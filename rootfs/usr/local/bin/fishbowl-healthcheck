@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Docker HEALTHCHECK: healthy only when MySQL answers and Fishbowl Server accepts
+# connections on its client port. The reason is printed for `docker inspect`.
+set -u
+status="$(cat /run/fishbowl/status 2>/dev/null || echo unknown)"
+if [ "$status" != running ]; then
+  case "$status" in
+    awaiting-database) echo "No Fishbowl database yet: run 'docker exec -it <container> fishbowl-admin' to create one" ;;
+    setup)             echo "First-time setup in progress" ;;
+    upgrading)         echo "Upgrade in progress" ;;
+    starting)          echo "Fishbowl Server is starting (after an upgrade it updates the database first)" ;;
+    admin)             echo "Server Administration only (admin command); Fishbowl Server is not running" ;;
+    *)                 echo "Not running yet (status: $status)" ;;
+  esac
+  exit 1
+fi
+if ! mysqladmin --protocol=socket --socket=/var/lib/mysql/mysql.sock ping --silent >/dev/null 2>&1; then
+  echo "MySQL is not answering"
+  exit 1
+fi
+port="$(python3 -I /usr/local/lib/fishbowl/props.py get /opt/Fishbowl/server/bin/eve.properties webPort 2>/dev/null || echo 2456)"
+if ! timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
+  echo "Fishbowl Server is not accepting connections on port $port"
+  exit 1
+fi
+echo "MySQL and Fishbowl Server are up (client port $port)"

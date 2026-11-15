@@ -1,0 +1,42 @@
+# Fishbowl Advanced in Docker, with Docker Compose. See README.md.
+#
+#   First time (builds the image from GitHub, then interactive setup):
+#       docker compose run --rm --service-ports fishbowl
+#   Every day:
+#       docker compose up -d
+#   After the installer on GitHub changes (new Fishbowl version):
+#       docker compose build && docker compose stop
+#       docker compose run --rm --service-ports fishbowl     (accept the new EULA)
+#
+# Volume names are fixed so `docker run` and Compose share the same data.
+name: fishbowl
+
+services:
+  fishbowl:
+    # The image is built from the GitHub repository, which also downloads the
+    # Fishbowl installer from the repository's release. `pull_policy: never`
+    # means Compose builds it when it's missing instead of looking on Docker Hub.
+    image: fishbowl
+    pull_policy: never
+    build: https://github.com/cesiumskater/Docker_Testing.git#main
+    container_name: fishbowl
+    restart: unless-stopped
+    # Fishbowl Server and MySQL need time to shut down cleanly.
+    stop_grace_period: 3m
+    ports:
+      - "2456:2456"            # Fishbowl Clients connect here
+      - "127.0.0.1:6080:6080"  # Server Administration in your browser; this computer only
+    volumes:
+      - fishbowl-mysql:/var/lib/mysql
+      - fishbowl-app:/opt/Fishbowl
+      - fishbowl-data:/var/lib/fishbowl
+    environment:
+      TZ: UTC  # your time zone, for example America/Denver
+
+volumes:
+  fishbowl-mysql:
+    name: fishbowl-mysql
+  fishbowl-app:
+    name: fishbowl-app
+  fishbowl-data:
+    name: fishbowl-data

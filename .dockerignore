@@ -1,0 +1,4 @@
+# The build only needs these two directories.
+*
+!build/
+!rootfs/

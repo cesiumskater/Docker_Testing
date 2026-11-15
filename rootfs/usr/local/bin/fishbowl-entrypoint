@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+# fishbowl-entrypoint: the container's main process (tini is PID 1 above it).
+#
+#   run              (default) first start: interactive setup; newer image:
+#                    interactive upgrade; then run MySQL + Fishbowl Server and
+#                    supervise both
+#   restore FILE     load a backup written by fishbowl-backup (stop the running
+#                    container first; needs a terminal for the MySQL password)
+#   versions         print the Fishbowl, MySQL and Java versions in this image
+#   <command>        anything else runs as a command, e.g. bash
+
+# shellcheck source=/dev/null
+. /usr/local/lib/fishbowl/common.sh
+# shellcheck source=/dev/null
+. "$LIB_DIR/setup.sh"
+# shellcheck source=/dev/null
+. "$LIB_DIR/upgrade.sh"
+
+FIRST_RUN=0
+ADMIN_PID=""
+FB_LOG_OFFSET=0
+
+on_exit() {
+  local rc=$?
+  set +o errexit
+  trap - EXIT TERM INT HUP
+  setup_cleanup
+  upgrade_cleanup
+  if [ -n "$ADMIN_PID" ]; then
+    kill -TERM "$ADMIN_PID" 2>/dev/null
+    wait "$ADMIN_PID" 2>/dev/null
+  fi
+  fishbowl_stop
+  mysql_stop
+  set_status stopped
+  exit "$rc"
+}
+on_signal() {
+  local status
+  status="$(cat "$STATUS_FILE" 2>/dev/null || true)"
+  log "Stop requested; shutting down Fishbowl Server, then MySQL"
+  case "$status" in
+    running|awaiting-database|starting|admin) exit 0 ;;   # a normal stop
+    *) exit 143 ;;                                   # interrupted setup/upgrade: not a success
+  esac
+}
+
+# --------------------------------------------------------------- checks -----
+check_volumes() {
+  [ "${FISHBOWL_ALLOW_NO_VOLUMES:-0}" = 1 ] && return 0
+  local missing=() p
+  for p in "$MYSQL_DATA" "$FB_HOME" "$DATA_DIR"; do
+    mountpoint -q "$p" || missing+=("$p")
+  done
+  [ "${#missing[@]}" = 0 ] && return 0
+  note ""
+  note "These paths are not on volumes: ${missing[*]}"
+  note "Everything in them (your Fishbowl install and database) would be lost when"
+  note "this container is removed, so the container won't start without them. Start it"
+  note "with all three volumes, for example:"
+  note ""
+  print_setup_command
+  note ""
+  note "(For throwaway testing only, FISHBOWL_ALLOW_NO_VOLUMES=1 skips this check.)"
+  exit 2
+}
+
+prepare_dirs() {
+  mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$LOG_DIR" "$HOMES_DIR" "$RUN_DIR" "$MYSQL_RUN"
+  chmod 0700 "$STATE_DIR" "$BACKUP_DIR"
+  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$HOMES_DIR"
+  touch "$LOG_DIR/mysqld.log"
+  chown mysql:mysql "$LOG_DIR/mysqld.log"
+  chmod 0640 "$LOG_DIR/mysqld.log"
+  prepare_import_dir
+}
+
+acquire_lock() {
+  exec 9>"$DATA_DIR/.container.lock"
+  if ! flock -n 9; then
+    fail 6 "Another container is already using these volumes (it holds $DATA_DIR/.container.lock). Stop it first: two copies of MySQL on one data directory would corrupt it."
+  fi
+}
+
+dir_has_content() {
+  [ -n "$(find "$1" -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit 2>/dev/null)" ]
+}
+
+detect_state() {
+  if setup_complete; then echo installed
+  elif [ -f "$STATE_DIR/setup.in-progress" ]; then echo partial
+  elif dir_has_content "$MYSQL_DATA" || dir_has_content "$FB_HOME"; then echo foreign
+  else echo fresh
+  fi
+}
+
+# Only reached when setup.in-progress proves an earlier setup in these volumes
+# created this content and never finished (so no Fishbowl database exists yet).
+cleanup_partial_setup() {
+  log "An earlier setup did not finish. Clearing what it left behind and starting setup over."
+  find /var/lib/mysql -mindepth 1 -delete
+  find /opt/Fishbowl -mindepth 1 -delete
+  clear_installer_tmp
+  rm -f "$STATE_DIR/setup.in-progress" "$STATE_DIR/installed-version" "$STATE_DIR/install-type"
+}
+
+print_needs_setup() {
+  note ""
+  note "Fishbowl is not installed in these volumes yet, and first-time setup needs you"
+  note "at a terminal: it shows Fishbowl's license agreement for you to accept and asks"
+  note "for your license key and a MySQL root password. No terminal is attached, so"
+  note "nothing was accepted or installed. Run setup interactively:"
+  note ""
+  print_setup_command
+  note ""
+}
+
+print_foreign() {
+  note ""
+  note "The volumes at /var/lib/mysql and/or /opt/Fishbowl already contain data, but"
+  note "the state volume at /var/lib/fishbowl has no record of a finished setup."
+  note "To protect that data nothing was changed. If these volumes belong together,"
+  note "mount the matching state volume at /var/lib/fishbowl. To start over instead,"
+  note "remove the volumes (this deletes their data):"
+  note "  docker volume rm $(volume_name_for "$MYSQL_DATA" fishbowl-mysql) $(volume_name_for "$FB_HOME" fishbowl-app) $(volume_name_for "$DATA_DIR" fishbowl-data)"
+  note ""
+}
+
+installed_app_version() {  # what /opt/Fishbowl itself says it is (e.g. 26.10)
+  grep -o 'applicationVersion="[^"]*"' "$FB_HOME/.install4j/i4jparams.conf" 2>/dev/null | head -n 1 | cut -d'"' -f2
+}
+
+check_version() {
+  local inst; inst="$(installed_version)"
+  [ -n "$inst" ] || fail 1 "Setup is marked complete but $STATE_DIR/installed-version is missing."
+  local recorded actual
+  recorded="$(cat "$STATE_DIR/installed-app-version" 2>/dev/null || true)"
+  actual="$(installed_app_version)"
+  if [ -n "$recorded" ] && [ -n "$actual" ] && [ "$recorded" != "$actual" ]; then
+    warn "Fishbowl in $FB_HOME reports version $actual, but this container last installed $recorded."
+    warn "Fishbowl may have updated itself (Server Administration -> Server -> Auto Updates). Updates normally come from new images."
+  fi
+  [ "$inst" = "$FISHBOWL_VERSION" ] && return 0
+  if ver_gt "$FISHBOWL_VERSION" "$inst"; then
+    if installed_is_trial && [ "${FISHBOWL_ALLOW_TRIAL_UPGRADE:-0}" != 1 ]; then
+      print_trial_upgrade_refused "$inst"
+      exit 7
+    fi
+    if ! is_interactive; then
+      note ""
+      note "This image has Fishbowl $FISHBOWL_VERSION; your volumes have $inst. Upgrading asks you"
+      note "to accept the license agreement for $FISHBOWL_VERSION and for the MySQL root password"
+      note "(for a backup), so it needs a terminal. Nothing was changed. Run:"
+      note ""
+      print_upgrade_command
+      note ""
+      note "To keep running $inst without upgrading, use the image $(image_with_tag "$inst")."
+      exit 3
+    fi
+    run_upgrade "$inst"
+  else
+    fail 4 "This image has Fishbowl $FISHBOWL_VERSION, which is older than the $inst installed in your volumes. Downgrades are refused: Fishbowl updates its database forward only. Use $(image_with_tag "$inst") or newer."
+  fi
+}
+
+# Seen with 26.9.1 -> 26.10: Fishbowl Server refuses to update a trial's database
+# ("Trial accounts do not have access to update the database") and never opens its
+# port. Every Fishbowl release so far has moved the database version, so a trial is
+# not upgraded unless FISHBOWL_ALLOW_TRIAL_UPGRADE=1 says the new version won't.
+print_trial_upgrade_refused() {
+  local inst="$1"
+  hr
+  note " Fishbowl $inst is a trial installation; not upgrading it to $FISHBOWL_VERSION"
+  hr
+  note "Fishbowl Server doesn't update a trial's database to a new version. It stops"
+  note "with \"Trial accounts do not have access to update the database\", so this"
+  note "upgrade would leave Fishbowl unable to start. Nothing was changed."
+  note ""
+  note "What you can do:"
+  note "  - Keep running $inst: use the image $(image_with_tag "$inst")"
+  note "    (with Docker Compose, put that in the image: line of compose.yaml)."
+  note "  - Licensed now? While $inst runs, enter your purchased license in Server"
+  note "    Administration (docker exec -it <container-name> fishbowl-admin, License"
+  note "    tab), then start this image again to upgrade."
+  note "  - Try $FISHBOWL_VERSION as a new trial on new, empty volumes (the old trial's"
+  note "    data stays in the old volumes)."
+  hr
+}
+
+# --------------------------------------------------------------- Fishbowl ---
+fishbowl_start() {
+  log "Starting Fishbowl Server $FISHBOWL_APP_VERSION (service launcher, user '$FB_USER')"
+  FB_LOG_OFFSET="$(stat -c %s "$FB_SERVER_LOG" 2>/dev/null || echo 0)"
+  cd "$FB_BIN"
+  setsid setpriv --reuid="$FB_USER" --regid="$FB_USER" --init-groups --inh-caps=-all -- \
+    env -i PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
+      HOME="$HOMES_DIR/$FB_USER" USER="$FB_USER" LOGNAME="$FB_USER" \
+      LANG="${LANG:-C.UTF-8}" TZ="${TZ:-UTC}" JAVA_HOME="$JAVA21_HOME" \
+      INSTALL4J_JAVA_HOME_OVERRIDE="$JAVA21_HOME" INSTALL4J_JAVA_HOME="$JAVA21_HOME" \
+      "$FB_SERVICE_LAUNCHER" run &
+  FB_PID=$!
+  cd /
+  local port waited=0 next_note=300 reason
+  port="$(client_port)"
+  # No time limit while the server is alive: after an upgrade it updates the
+  # database before it listens, and stopping it halfway could damage the database.
+  while :; do
+    if ! kill -0 "$FB_PID" 2>/dev/null; then
+      FB_PID=""
+      fail 1 "Fishbowl Server exited during startup. Its log: $FB_SERVER_LOG"
+    fi
+    if reason="$(db_update_refusal)"; then
+      print_db_update_refused "$reason"
+      fail 1 "Fishbowl Server could not update the database (see above)."
+    fi
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      local xmx
+      xmx="$(tr '\0' '\n' < "/proc/$FB_PID/cmdline" | grep -E '^-Xmx' | tail -n 1 || true)"
+      log "Fishbowl Server is running (heap ${xmx#-Xmx}); Fishbowl Clients connect to this host on port $port"
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+    if [ "$waited" -ge "$next_note" ]; then
+      log "Fishbowl Server is still starting after ${waited}s (not listening on port $port yet). After an upgrade it updates the database first, which can take a long time on a large database; don't stop the container meanwhile. Its log: $FB_SERVER_LOG"
+      next_note=$((next_note + 300))
+    fi
+  done
+}
+
+# Prints Fishbowl's reason if, since this start, it logged that it could not update
+# the database (it then keeps running without opening its port).
+db_update_refusal() {
+  [ -f "$FB_SERVER_LOG" ] || return 1
+  local from="$FB_LOG_OFFSET" text
+  [ "$(stat -c %s "$FB_SERVER_LOG")" -ge "$from" ] || from=0
+  text="$(tail -c +"$((from + 1))" "$FB_SERVER_LOG" | grep -F -A1 -m1 "Unable to update your database" || true)"
+  [ -n "$text" ] || return 1
+  sleep 2   # let the reason line follow
+  text="$(tail -c +"$((from + 1))" "$FB_SERVER_LOG" | grep -F -A1 -m1 "Unable to update your database" || true)"
+  printf '%s\n' "$text" | sed -n 's/^[^)]*)[[:space:]]*- //p' | tail -n 1
+}
+
+print_db_update_refused() {
+  hr
+  note " Fishbowl Server could not update your database to Fishbowl $FISHBOWL_APP_VERSION"
+  hr
+  note "Fishbowl says: ${1:-Unable to update your database.}"
+  note "It can't serve Fishbowl Clients until the database is updated, so the container"
+  note "is stopping."
+  local f newest=""
+  for f in "$BACKUP_DIR"/pre-upgrade-*.sql.gz; do
+    [ -e "$f" ] && { [ -z "$newest" ] || [ "$f" -nt "$newest" ]; } && newest="$f"
+  done
+  [ -z "$newest" ] || note "The backup taken before the upgrade: $newest"
+  note ""
+  note "If the reason concerns the license, check it in Server Administration (License"
+  note "tab) or with Fishbowl. To open Server Administration without Fishbowl Server:"
+  note "  docker compose run --rm --service-ports fishbowl admin"
+  note "  (or: docker run -it --rm -p 127.0.0.1:6080:6080 <the same -v options> <image> admin)"
+  note "Downgrades are refused, so the way back to the previous version is a"
+  note "whole-installation backup from before the upgrade (README, Data section)."
+  hr
+}
+
+fishbowl_stop() {
+  [ -n "${FB_PID:-}" ] || return 0
+  if kill -0 "$FB_PID" 2>/dev/null; then
+    log "Stopping Fishbowl Server"
+    kill -TERM "$FB_PID" 2>/dev/null || true
+    for _ in $(seq 1 90); do
+      kill -0 "$FB_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$FB_PID" 2>/dev/null; then
+      warn "Fishbowl Server did not stop within 90 s; forcing it."
+      kill -KILL "$FB_PID" 2>/dev/null || true
+    fi
+  fi
+  wait "$FB_PID" 2>/dev/null || true
+  FB_PID=""
+}
+
+await_database() {
+  set_status awaiting-database
+  local name="${HOSTNAME:-unknown}"
+  hr
+  note "Fishbowl is installed, but it has no company database yet, so Fishbowl Server"
+  note "can't start. Create the database in Fishbowl Server Administration. In another"
+  note "terminal on this machine run:"
+  note ""
+  note "  docker exec -it <container-name> fishbowl-admin"
+  note ""
+  note "(<container-name> is fishbowl if you used the README's commands; this"
+  note "container's ID is $name.) Fishbowl Server starts by itself once the database exists."
+  hr
+  while ! database_configured; do
+    kill -0 "$MYSQLD_PID" 2>/dev/null || fail 1 "MySQL stopped while waiting for a database."
+    sleep 5 &
+    wait $! || true
+  done
+  log "Database '$(eve_get dbName)' is configured."
+}
+
+supervise() {
+  set_status running
+  while :; do
+    if ! kill -0 "$MYSQLD_PID" 2>/dev/null; then
+      MYSQLD_PID=""
+      fail 1 "MySQL stopped unexpectedly; stopping the container. MySQL's log: $LOG_DIR/mysqld.log"
+    fi
+    if ! kill -0 "$FB_PID" 2>/dev/null; then
+      FB_PID=""
+      fail 1 "Fishbowl Server stopped unexpectedly; stopping the container. Its log: $FB_SERVER_LOG"
+    fi
+    wait -n "$MYSQLD_PID" "$FB_PID" 2>/dev/null || true
+  done
+}
+
+run_services() {
+  set_status starting
+  fix_ownership
+  sync_server_memory
+  apply_fishbowl_mycnf
+  mysql_start
+  log "MySQL is accepting connections ($(mysqld --version | grep -oE 'Ver [0-9.]+'))"
+  if ! database_configured; then
+    if [ "$FIRST_RUN" = 1 ] && is_interactive; then
+      set_status awaiting-database
+      # Background job + wait: `wait` returns as soon as a stop signal arrives,
+      # so docker stop / Ctrl-C still shut down in order during this step.
+      fishbowl-admin --first-run 0<&0 &
+      ADMIN_PID=$!
+      wait "$ADMIN_PID" || true
+      ADMIN_PID=""
+    fi
+    database_configured || await_database
+  fi
+  fishbowl_start
+  supervise
+}
+
+# -------------------------------------------------------------- commands ----
+cmd_run() {
+  [ "$(id -u)" = 0 ] || fail 1 "The container must start as root; it drops to the mysql and fishbowl users itself."
+  check_volumes
+  prepare_dirs
+  acquire_lock
+  trap on_exit EXIT
+  trap on_signal TERM INT HUP
+
+  case "$(detect_state)" in
+    installed) apply_pending_settings ;;
+    fresh|partial)
+      if ! is_interactive; then print_needs_setup; exit 3; fi
+      [ -f "$STATE_DIR/setup.in-progress" ] && cleanup_partial_setup
+      run_first_setup
+      FIRST_RUN=1
+      ;;
+    foreign) print_foreign; exit 5 ;;
+  esac
+  check_version
+  run_services
+}
+
+cmd_restore() {
+  local file="${1:-}"
+  [ "$(id -u)" = 0 ] || fail 1 "Run as root."
+  [ -n "$file" ] || fail 1 "Usage: restore /var/lib/fishbowl/backups/<backup>.sql.gz"
+  [ -f "$file" ] || fail 1 "No such file: $file (copy it into the container's /var/lib/fishbowl/backups first)."
+  is_interactive || fail 3 "restore asks for the MySQL root password, so it needs a terminal (docker compose run --rm fishbowl restore FILE)."
+  check_volumes
+  prepare_dirs
+  acquire_lock
+  setup_complete || fail 1 "Fishbowl isn't set up in these volumes; finish first-time setup first."
+  trap on_exit EXIT
+  trap on_signal TERM INT HUP
+  note "Restoring $file into MySQL. This replaces the databases it contains."
+  local answer=""
+  ask answer 'Type "restore" to continue: ' || exit 3
+  [ "$answer" = restore ] || { note "Cancelled; nothing changed."; exit 1; }
+  apply_fishbowl_mycnf   # Fishbowl's max_allowed_packet, for large rows in the dump
+  mysql_start
+  local rc=0
+  ask_root_password_until_valid || rc=$?
+  [ "$rc" = 0 ] || exit 1
+  log "Loading the backup (this can take a while)"
+  gzip -dc "$file" | MYSQL_PWD="$UPG_PW" mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u root --max-allowed-packet=1G ||
+    fail 1 "Loading the backup failed; see the MySQL error above."
+  upgrade_cleanup
+  log "Restore finished. Start the container normally."
+}
+
+# Server Administration with MySQL but without Fishbowl Server: for when the server
+# can't start (for example to check the license or the database connection).
+cmd_admin() {
+  [ "$(id -u)" = 0 ] || fail 1 "Run as root."
+  is_interactive || fail 3 "admin shows a session password, so it needs a terminal (docker compose run --rm --service-ports fishbowl admin)."
+  check_volumes
+  prepare_dirs
+  acquire_lock
+  setup_complete || fail 1 "Fishbowl isn't set up in these volumes; start the container normally for first-time setup."
+  [ "$(installed_version)" = "$FISHBOWL_VERSION" ] ||
+    fail 1 "This image has Fishbowl $FISHBOWL_VERSION and your volumes have $(installed_version). Use $(image_with_tag "$(installed_version)") for admin."
+  trap on_exit EXIT
+  trap on_signal TERM INT HUP
+  apply_pending_settings
+  apply_fishbowl_mycnf
+  mysql_start
+  set_status admin
+  fishbowl-admin --standalone 0<&0 &
+  ADMIN_PID=$!
+  wait "$ADMIN_PID" || true
+  ADMIN_PID=""
+  log "Start the container normally to run Fishbowl Server."
+}
+
+cmd_version() { printf '%s\n' "$FISHBOWL_VERSION"; }   # for tagging: fishbowl:$(docker run --rm fishbowl version)
+
+cmd_versions() {
+  note "Fishbowl:  $FISHBOWL_APP_VERSION (installer $(basename "$FISHBOWL_INSTALLER"))"
+  note "MySQL:     $(mysqld --version | grep -oE 'Ver [0-9.]+' | cut -d' ' -f2)"
+  note "Java:      $("$JAVA21_HOME/bin/java" -version 2>&1 | head -n 1)"
+  [ -f "$STATE_DIR/installed-version" ] && note "Installed: $(installed_version)"
+  return 0
+}
+
+case "${1:-run}" in
+  run)      cmd_run ;;
+  restore)  shift; cmd_restore "$@" ;;
+  admin)    cmd_admin ;;
+  versions) cmd_versions ;;
+  version)  cmd_version ;;
+  *)        exec "$@" ;;
+esac

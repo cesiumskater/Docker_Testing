@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# fishbowl-admin: open Fishbowl Server Administration in your web browser.
+#
+#   docker exec -it fishbowl fishbowl-admin
+#
+# Server Administration is a desktop (Swing) program; Fishbowl Server itself
+# runs headless. This starts a private virtual screen just for this session
+# (Xvfb), shares it over VNC with a one-time password (x11vnc), and serves the
+# noVNC web client on port 6080. Publish that port on 127.0.0.1 only
+# (-p 127.0.0.1:6080:6080). Everything stops when Server Administration closes.
+
+# shellcheck source=/dev/null
+. /usr/local/lib/fishbowl/common.sh
+
+readonly DISPLAY_NUM=99
+readonly NOVNC_PORT=6080
+readonly VNC_PORT=5900
+FIRST_RUN_MODE=0 STANDALONE=0
+[ "${1:-}" = "--first-run" ] && FIRST_RUN_MODE=1
+[ "${1:-}" = "--standalone" ] && STANDALONE=1   # from the entrypoint's `admin` command: no Fishbowl Server
+
+[ "$(id -u)" = 0 ] || fail 1 "Run it as root: docker exec -it <container> fishbowl-admin"
+setup_complete || fail 1 "Fishbowl isn't installed yet. Finish first-time setup, then run fishbowl-admin."
+is_interactive || fail 1 "fishbowl-admin needs a terminal to show you the session password: docker exec -it <container> fishbowl-admin"
+
+mkdir -p "$RUN_DIR"
+exec 8>"$RUN_DIR/admin.lock"
+if ! flock -n 8; then
+  # Closing the terminal of a `docker exec` session doesn't stop the session inside
+  # the container, so an old one may still hold the lock. Offer to end it.
+  old_pid="$(cat "$RUN_DIR/admin.pid" 2>/dev/null || true)"
+  note "Another Server Administration session is still open$( [ -n "$old_pid" ] && printf ' (started %s)' "$(ps -o lstart= -p "$old_pid" 2>/dev/null | sed 's/^ *//')")."
+  note "If you're not using it (for example, its terminal was closed), it can be ended now."
+  answer=""
+  ask answer "End it and start a new session? [y/N] " || answer=""
+  case "$answer" in
+    y|Y|yes|YES)
+      [ -n "$old_pid" ] && kill -TERM "$old_pid" 2>/dev/null
+      flock -w 30 8 || fail 1 "The other session didn't end. Restart the container to clear it: docker restart <container-name>"
+      note "Ended the other session." ;;
+    *) fail 1 "Left the other session open. Use it in your browser, or end it with Ctrl-C in its terminal." ;;
+  esac
+fi
+printf '%s\n' "$$" > "$RUN_DIR/admin.pid"
+prepare_import_dir   # .sql files copied in for the Restore tab become readable by Server Administration
+
+SESSION_DIR=""
+CHILD_PIDS=()
+cleanup() {
+  set +o errexit
+  local pid
+  for pid in "${CHILD_PIDS[@]}"; do
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  done
+  sleep 1
+  for pid in "${CHILD_PIDS[@]}"; do
+    kill -KILL -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  done
+  [ -n "$SESSION_DIR" ] && rm -rf -- "$SESSION_DIR"
+  rm -f "/tmp/.X11-unix/X$DISPLAY_NUM" "/tmp/.X$DISPLAY_NUM-lock"
+  [ "$(cat "$RUN_DIR/admin.pid" 2>/dev/null)" = "$$" ] && rm -f "$RUN_DIR/admin.pid"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+
+# Runs a command as the fishbowl user in its own session/process group.
+spawn_as_fishbowl() {
+  setsid setpriv --reuid="$FB_USER" --regid="$FB_USER" --init-groups --inh-caps=-all -- \
+    env -i PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
+      HOME="$HOMES_DIR/$FB_USER" USER="$FB_USER" LOGNAME="$FB_USER" \
+      LANG="${LANG:-C.UTF-8}" TZ="${TZ:-UTC}" JAVA_HOME="$JAVA21_HOME" DISPLAY=":$DISPLAY_NUM" \
+      INSTALL4J_JAVA_HOME_OVERRIDE="$JAVA21_HOME" INSTALL4J_JAVA_HOME="$JAVA21_HOME" "$@" &
+  CHILD_PIDS+=("$!")
+}
+
+fix_ownership
+SESSION_DIR="$(secret_dir)"
+chown "$FB_USER:$FB_USER" "$SESSION_DIR"
+SESSION_LOG="$LOG_DIR/admin-session.log"
+: > "$SESSION_LOG"
+
+# One-time password; VNC authentication uses at most 8 characters.
+PASSWORD="$(LC_ALL=C tr -dc 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789' < /dev/urandom | head -c 8 || true)"
+[ "${#PASSWORD}" = 8 ] || fail 1 "Could not generate a session password."
+( umask 077; printf '%s\n' "$PASSWORD" > "$SESSION_DIR/vncpass" )
+chown "$FB_USER:$FB_USER" "$SESSION_DIR/vncpass"
+
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+rm -f "/tmp/.X11-unix/X$DISPLAY_NUM" "/tmp/.X$DISPLAY_NUM-lock"
+spawn_as_fishbowl Xvfb ":$DISPLAY_NUM" -screen 0 1280x800x24 -nolisten tcp -dpi 96 >>"$SESSION_LOG" 2>&1
+for _ in $(seq 1 50); do [ -S "/tmp/.X11-unix/X$DISPLAY_NUM" ] && break; sleep 0.2; done
+[ -S "/tmp/.X11-unix/X$DISPLAY_NUM" ] || fail 1 "The virtual screen (Xvfb) did not start; see $SESSION_LOG"
+
+# x11vnc reads the password file and deletes it ("rm:" prefix).
+spawn_as_fishbowl x11vnc -display ":$DISPLAY_NUM" -rfbport "$VNC_PORT" -passwdfile "rm:$SESSION_DIR/vncpass" \
+  -forever -shared -noxdamage -nowf -noxrecord -quiet >>"$SESSION_LOG" 2>&1
+spawn_as_fishbowl websockify --web /usr/share/novnc "0.0.0.0:$NOVNC_PORT" "127.0.0.1:$VNC_PORT" >>"$SESSION_LOG" 2>&1
+for _ in $(seq 1 75); do
+  (exec 3<>"/dev/tcp/127.0.0.1/$NOVNC_PORT") 2>/dev/null && (exec 3<>"/dev/tcp/127.0.0.1/$VNC_PORT") 2>/dev/null && break
+  sleep 0.2
+done
+(exec 3<>"/dev/tcp/127.0.0.1/$VNC_PORT") 2>/dev/null || fail 1 "The VNC server (x11vnc) did not start; see $SESSION_LOG"
+(exec 3<>"/dev/tcp/127.0.0.1/$NOVNC_PORT") 2>/dev/null || fail 1 "The noVNC web server (websockify) did not start; see $SESSION_LOG"
+
+before="$(cat "$FB_EVE" "$FB_BIN/dbsettings.properties" 2>/dev/null | sha256sum)"
+eve_before="$(sha256sum < "$FB_EVE" 2>/dev/null || true)"
+cd "$FB_BIN"
+spawn_as_fishbowl "$FB_ADMIN_LAUNCHER" >>"$SESSION_LOG" 2>&1
+ADMIN_PID="${CHILD_PIDS[-1]}"
+cd /
+
+hr
+note "Fishbowl Server Administration is open on a private virtual screen."
+note ""
+note "  1. In a browser on this computer, open:"
+note "       http://localhost:$NOVNC_PORT/vnc.html?autoconnect=1&resize=scale"
+note "  2. Session password:  $PASSWORD"
+note "     (valid only for this session; it stops working when the window closes)"
+note ""
+if [ "$FIRST_RUN_MODE" = 1 ] || ! database_configured; then
+  note "  3. Create your company database:"
+  note "       Database tab -> the green + button -> enter a database name"
+  note "       Host localhost, Port 3306, Username root, Password: your MySQL root password"
+  note "       (clear the long pre-filled password first) -> Connect"
+  note "     Fishbowl then asks for your country and inventory costing method; these"
+  note "     can't be changed later. Creating the database takes a few minutes."
+  if [ "$STANDALONE" = 1 ]; then
+    note "  4. Click OK to save, then OK again. Server Administration closes and this"
+    note "     session ends."
+  else
+    note "  4. Click OK to save, then OK again. Server Administration closes and this"
+    note "     session ends; Fishbowl Server starts on its own."
+  fi
+else
+  note "  When you're done, click OK (or Cancel) in Server Administration to end the session."
+fi
+note ""
+note "The page won't load unless the container was started with -p 127.0.0.1:$NOVNC_PORT:$NOVNC_PORT."
+note "Press Ctrl-C here to close the session without saving."
+hr
+
+wait "$ADMIN_PID" || true
+after="$(cat "$FB_EVE" "$FB_BIN/dbsettings.properties" 2>/dev/null | sha256sum)"
+server_up=0
+case "$(cat "$STATUS_FILE" 2>/dev/null)" in running|starting) server_up=1 ;; esac
+# Fishbowl Server writes its old settings back when it stops; keep the new ones.
+# Done before any output: the terminal may already be gone (window closed).
+if [ "$server_up" = 1 ] && [ "$(sha256sum < "$FB_EVE" 2>/dev/null || true)" != "$eve_before" ]; then
+  save_pending_settings
+fi
+fix_ownership
+log "Server Administration closed; session ended."
+if [ "$server_up" = 1 ] && [ "$before" != "$after" ]; then
+  note "Server Administration changed Fishbowl Server's settings. They take effect when"
+  note "Fishbowl Server restarts, which disconnects Fishbowl Clients:"
+  note "  docker restart <container-name>"
+fi

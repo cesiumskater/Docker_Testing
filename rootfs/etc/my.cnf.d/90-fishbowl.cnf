@@ -1,0 +1,14 @@
+# Fishbowl Advanced: required MySQL settings (install guide, Step 3).
+#
+# lower_case_table_names=1 must be in place BEFORE the data directory is
+# created; MySQL only accepts it at initialization. It is baked into the image,
+# so it is always there when first-time setup initializes MySQL.
+#
+# sql-mode must never include NO_AUTO_CREATE_USER (MySQL 8 refuses to start).
+#
+# Named 90-* so it is read after 50-fishbowl-server.cnf (Fishbowl's own my.cnf,
+# loaded at container start): MySQL reads this directory in name order and the
+# last value wins, so these two settings always come from here.
+[mysqld]
+lower_case_table_names=1
+sql-mode="STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
