@@ -1,6 +1,8 @@
 # Fishbowl Advanced on Linux, in one container: Java 21 + MySQL 8.4 + the
 # Fishbowl installer. Fishbowl itself is installed at FIRST START, after the
-# person running the container accepts Fishbowl's license agreement.
+# person running the container accepts Fishbowl's license agreement on the
+# Fishbowl page (http://localhost:6080/), which also shows Fishbowl Server
+# Administration and the Fishbowl Client in browser tabs.
 # See README.md.
 #
 # No "# syntax=" line on purpose: the Dockerfile frontend built into Docker is
@@ -40,8 +42,13 @@ FROM ${FEDORA_IMAGE}
 
 # MySQL 8.4 from Fedora's own repositories (the install guide's lab-tested
 # source), pinned to 8.4.x so a rebuild can never drift to 9.x. Java 21 is
-# Eclipse Temurin from Adoptium's repository, as in the guide. The X11/VNC
-# packages exist only for on-demand Server Administration (fishbowl-admin).
+# Eclipse Temurin from Adoptium's repository, as in the guide.
+#
+# The last two package lines are for the browser windows (fishbowl-session):
+#   tigervnc-x11-server  Xvnc, a virtual screen that resizes with the browser tab
+#   openbox              window manager (title bars, moving, maximizing)
+#   novnc, websockify    the VNC viewer that runs in the browser, and its bridge
+#   gtk3, nss, nspr      libraries the Fishbowl Client's built-in web view needs
 #
 # Fedora gives mysqld the file capability cap_sys_nice (thread priorities for
 # MySQL resource groups). Docker's default capability set doesn't include it,
@@ -53,25 +60,38 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         adoptium-temurin-java-repository \
         tini util-linux shadow-utils procps-ng findutils which less gzip tar tzdata \
         python3 libcap \
-        xorg-x11-server-Xvfb x11vnc novnc python3-websockify dejavu-sans-fonts \
+        tigervnc-x11-server openbox novnc python3-websockify dejavu-sans-fonts \
+        gtk3 nss nspr \
  && dnf -y install --setopt=install_weak_deps=False \
         --enablerepo=adoptium-temurin-java-repository temurin-21-jdk \
  && setcap -r /usr/libexec/mysqld \
  && dnf clean all \
  && rm -rf /var/cache/dnf /var/cache/libdnf5 /var/log/dnf* /var/log/hawkey.log
 
-# Build fails here unless mysqld/mysql are 8.4.x and Java is 21.
+# Build fails here unless mysqld/mysql are 8.4.x and Java is 21, or if the
+# pieces the browser windows need are missing.
 COPY rootfs/usr/local/lib/fishbowl/verify-runtime.sh /usr/local/lib/fishbowl/verify-runtime.sh
 RUN bash /usr/local/lib/fishbowl/verify-runtime.sh
 
-# Fishbowl Server and Server Administration run as this user, not root.
+# Fishbowl Server, Server Administration and the Fishbowl Client run as
+# "fishbowl", the Fishbowl page's web server as "fbweb". Neither is root.
 RUN groupadd --gid 1000 fishbowl \
  && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /var/lib/fishbowl/home/fishbowl \
-        --shell /sbin/nologin --comment "Fishbowl Server" fishbowl
+        --shell /sbin/nologin --comment "Fishbowl Server" fishbowl \
+ && groupadd --gid 1001 fbweb \
+ && useradd --uid 1001 --gid 1001 --no-create-home --home-dir /nonexistent \
+        --shell /sbin/nologin --comment "Fishbowl page" fbweb
 
+# Permissions are set here, not taken from the repository: files uploaded
+# through GitHub's web page lose their executable bit.
 COPY rootfs/ /
 RUN chmod 0755 /usr/local/bin/fishbowl-* /usr/local/lib/fishbowl/verify-runtime.sh \
- && chmod 0644 /usr/local/lib/fishbowl/*.sh /usr/local/lib/fishbowl/*.py /etc/my.cnf.d/90-fishbowl.cnf \
+ && chmod 0644 /usr/local/lib/fishbowl/*.sh /usr/local/lib/fishbowl/*.py /usr/local/lib/fishbowl/*.xml \
+        /etc/my.cnf.d/90-fishbowl.cnf \
+ && chmod 0755 /usr/local/lib/fishbowl/verify-runtime.sh \
+ && find /usr/local/share/fishbowl -type d -exec chmod 0755 {} + \
+ && find /usr/local/share/fishbowl -type f -exec chmod 0644 {} + \
+ && python3 -I -m py_compile /usr/local/lib/fishbowl/portal.py \
  && mkdir -p /opt/Fishbowl /var/lib/fishbowl \
  && test -z "$(ls -A /var/lib/mysql)"
 
@@ -90,10 +110,16 @@ RUN . /opt/fishbowl-installer/installer.env \
  && echo "Image carries Fishbowl $FISHBOWL_APP_VERSION ($FISHBOWL_INSTALLER)"
 
 LABEL org.opencontainers.image.title="Fishbowl Advanced for Linux (Docker)" \
-      org.opencontainers.image.description="Java 21 + MySQL 8.4 + the Fishbowl Advanced installer. Fishbowl installs at first start after you accept its license agreement." \
+      org.opencontainers.image.description="Java 21 + MySQL 8.4 + the Fishbowl Advanced installer. Fishbowl installs at first start after you accept its license agreement on the Fishbowl page (port 6080)." \
       org.opencontainers.image.source="https://github.com/cesiumskater/Docker_Testing"
 
-EXPOSE 2456
+# Kept last: nothing after this line may write to these paths. Named volumes
+# (README, compose.yaml) are what you want; without them Docker supplies unnamed
+# ones, and the Fishbowl page warns about that.
+VOLUME ["/var/lib/mysql", "/opt/Fishbowl", "/var/lib/fishbowl"]
+
+# 2456: Fishbowl Clients. 6080: the Fishbowl page (publish it on 127.0.0.1 only).
+EXPOSE 2456 6080
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10m --retries=3 \
   CMD ["/usr/local/bin/fishbowl-healthcheck"]

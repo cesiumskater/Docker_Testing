@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build-time gate: the image must carry MySQL 8.4.x and Java 21, nothing else.
 # Fishbowl Server rejects MySQL 9.x / MariaDB, and its installer rejects any Java but 21.
+# It also checks that the pieces behind the browser windows are present.
 set -euo pipefail
 
 die() { printf '\nBUILD STOPPED: %s\n\n' "$*" >&2; exit 1; }
@@ -21,4 +22,12 @@ java_ver="$("$java_bin" -version 2>&1 | head -n 1)"
 path_java="$(java -version 2>&1 | head -n 1)"
 [[ "$path_java" =~ \"21(\.[0-9]+)*\" ]] || die "java on PATH must be 21; it reports: $path_java"
 
-echo "Runtime check passed: ${mysqld_ver##*/} | $java_ver"
+for tool in Xvnc openbox websockify; do
+  command -v "$tool" >/dev/null || die "$tool is missing (needed to show Fishbowl's windows in the browser)"
+done
+[ -f /usr/share/novnc/core/rfb.js ] || die "noVNC's core/rfb.js is missing from /usr/share/novnc (the novnc package changed its layout?)"
+for lib in libgtk-3.so.0 libnss3.so libnspr4.so; do
+  ldconfig -p | grep -q "$lib" || die "$lib is missing (the Fishbowl Client's built-in web view needs it)"
+done
+
+echo "Runtime check passed: ${mysqld_ver##*/} | $java_ver | Xvnc, openbox, websockify, noVNC present"

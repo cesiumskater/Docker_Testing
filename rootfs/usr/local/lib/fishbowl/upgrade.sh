@@ -1,7 +1,13 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034  # SETUP_* and UPG_PW are read by functions in setup.sh / the callers
 # Upgrade an existing installation to the installer bundled in this image.
-# Sourced by fishbowl-entrypoint (common.sh and setup.sh are already loaded).
+# Sourced by fishbowl-entrypoint, fishbowl-upgrade and fishbowl-backup
+# (common.sh and setup.sh are already loaded).
+#
+# An upgrade never starts on its own. A newer image keeps running the Fishbowl
+# version that is installed until someone accepts the new version's license
+# agreement and gives the MySQL root password (for the backup), on the Fishbowl
+# page or with `fishbowl-upgrade` at a terminal.
 
 UPG_PW=""
 
@@ -47,58 +53,47 @@ ask_root_password_until_valid() {  # sets UPG_PW; MySQL must be running
   return 1
 }
 
-print_upgrade_command() {
-  note "  docker run -it --rm --name fishbowl --stop-timeout 180 \\"
-  note "    -p 2456:2456 -p 127.0.0.1:6080:6080 \\"
-  note "    -v $(volume_name_for "$MYSQL_DATA" fishbowl-mysql):/var/lib/mysql \\"
-  note "    -v $(volume_name_for "$FB_HOME" fishbowl-app):/opt/Fishbowl \\"
-  note "    -v $(volume_name_for "$DATA_DIR" fishbowl-data):/var/lib/fishbowl \\"
-  note "    ${FISHBOWL_IMAGE:-fishbowl}"
+# Seen with 26.9.1 -> 26.10: Fishbowl Server refuses to update a trial's database
+# ("Trial accounts do not have access to update the database") and never opens its
+# port. Every Fishbowl release so far has moved the database version, so a trial is
+# not offered the upgrade unless FISHBOWL_ALLOW_TRIAL_UPGRADE=1 says the new version
+# leaves the database alone. The installed version keeps running.
+trial_upgrade_text() {  # trial_upgrade_text <installed-version>
+  local inst="$1"
+  note "This image carries Fishbowl $FISHBOWL_VERSION, but Fishbowl $inst in your volumes is a"
+  note "trial installation, so it is not upgraded: Fishbowl Server doesn't update a"
+  note "trial's database to a new version (it stops with \"Trial accounts do not have"
+  note "access to update the database\"). Fishbowl $inst keeps running, and nothing was changed."
   note ""
-  note "or, with Docker Compose (stop the running service first):"
-  note "  docker compose run --rm --service-ports fishbowl"
+  note "What you can do:"
+  note "  - Licensed now? Enter your purchased license in Server Administration"
+  note "    (License tab), then restart the container: the upgrade is offered then."
+  note "  - Try $FISHBOWL_VERSION as a new trial on new, empty volumes (the old trial's"
+  note "    data stays in the old volumes)."
+  note "  - Keep things as they are: the image $(image_with_tag "$inst") matches what is installed."
 }
 
-run_upgrade() {
+upgrade_offer_text() {  # upgrade_offer_text <installed-version>
+  note "This image carries Fishbowl $FISHBOWL_VERSION; your volumes have $1, which keeps"
+  note "running. Upgrading needs you: accept the license agreement for $FISHBOWL_VERSION and"
+  note "give the MySQL root password (the database is backed up first). Do that on the"
+  note "Fishbowl page, or run:  docker exec -it <container> fishbowl-upgrade"
+}
+
+upgrade_interrupted_text() {  # upgrade_interrupted_text <installed-version>
+  note "An upgrade from Fishbowl $1 to $FISHBOWL_VERSION started earlier and did not finish, so"
+  note "Fishbowl Server is not started (its program files may be half-updated). Run the"
+  note "upgrade again on the Fishbowl page, or with:"
+  note "  docker exec -it <container> fishbowl-upgrade"
+  note "The database backup from the first attempt is in $BACKUP_DIR."
+}
+
+# The unattended part. Needs MySQL running and UPG_PW holding the root password;
+# the license agreement has been accepted and recorded by the caller. Until the
+# installer starts, a failure changes nothing (no upgrade.in-progress marker).
+perform_upgrade() {  # perform_upgrade <installed-version>
   local from="$1" to="$FISHBOWL_VERSION" rc=0
-  hr
-  note " Fishbowl upgrade: $from  ->  $to"
-  hr
-  note "This image carries Fishbowl $FISHBOWL_APP_VERSION (installer $to). Your volumes have $from."
-  note "To upgrade: accept the license agreement for $to, then enter the MySQL root"
-  note "password so the database can be backed up first. After that it runs on its own:"
-  note "backup, then Fishbowl's installer updates /opt/Fishbowl in place. Your company"
-  note "name, license key and data are kept, and MySQL is not re-initialized."
-  note ""
-
-  eula_accept "$to" || rc=$?
-  if [ "$rc" = 2 ]; then
-    note ""; note "No answer came from the terminal; nothing was changed."
-    exit 3
-  elif [ "$rc" != 0 ]; then
-    note ""
-    note "You did not accept the license agreement for $to, so nothing was upgraded or"
-    note "changed. Fishbowl $from and its data are untouched. To keep running $from,"
-    note "use the image $(image_with_tag "$from") instead of this one."
-    exit 1
-  fi
-  note "License agreement for $to accepted."
-  note ""
-
-  apply_fishbowl_mycnf   # Fishbowl's max_allowed_packet etc. for mysqld and mysqldump
-  mysql_start
-  hr
-  note "MySQL root password (the one chosen at first setup), for the pre-upgrade backup."
-  rc=0; ask_root_password_until_valid || rc=$?
-  if [ "$rc" != 0 ]; then
-    note "Without the MySQL root password the backup can't run, so nothing was upgraded."
-    exit "$([ "$rc" = 2 ] && echo 3 || echo 1)"
-  fi
-  note ""
-  note "Upgrading now. No more questions."
-
   set_status upgrading
-  write_state upgrade.in-progress "$(_ts) $from -> $to"
   local backup
   backup="$(backup_databases UPG_PW "pre-upgrade-${from}-to-${to}")"
 
@@ -141,10 +136,13 @@ run_upgrade() {
 
   local logfile
   logfile="$LOG_DIR/upgrade-${from}-to-${to}-$(date -u +%Y%m%dT%H%M%SZ).log"
+  # From here on /opt/Fishbowl is being changed: an interruption must be finished
+  # (by running the upgrade again) before Fishbowl Server may start.
+  write_state upgrade.in-progress "$(_ts) $from -> $to"
   log "Running Fishbowl's $to installer over the existing install (unattended)"
   rc=0; run_installer "$secrets/response.varfile" "$logfile" || rc=$?
   rm -f "$secrets/response.varfile"
-  [ "$rc" = 0 ] || fail 1 "The Fishbowl installer exited with status $rc during the upgrade. Output: $logfile. Your database backup: $backup. Start the container again to retry the upgrade."
+  [ "$rc" = 0 ] || fail 1 "The Fishbowl installer exited with status $rc during the upgrade. Output: $logfile. Your database backup: $backup. Run the upgrade again (Fishbowl page, or fishbowl-upgrade); Fishbowl Server stays stopped until it finishes."
 
   # The database connection must survive the update; put it back if the installer reset it.
   if [ -z "$(eve_get dbName || true)" ] && props_get "$secrets/eve.properties.before" dbName >/dev/null 2>&1; then
@@ -156,10 +154,6 @@ run_upgrade() {
   restore_memory_settings "$secrets/vmoptions"
   log "Memory kept as before the upgrade: server $(xmx_of "$FB_BIN/Fishbowl Server Service.vmoptions"), client $(xmx_of "$FB_HOME/client/bin/Fishbowl Client.vmoptions")"
   fix_ownership
-  apply_fishbowl_mycnf
-  mysql_stop
-  mysql_start
-  mysql_stop
 
   write_state installed-version "$to"
   write_state installed-app-version "$FISHBOWL_APP_VERSION"

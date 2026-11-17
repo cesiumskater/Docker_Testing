@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Window manager settings for the Fishbowl browser windows (fishbowl-session).
+     Kept small on purpose: windows can be moved, resized, maximized and closed.
+     There is no desktop menu, no taskbar and no minimize button, because a
+     minimized window would have nowhere to come back from. -->
+<openbox_config xmlns="http://openbox.org/3.4/rc" xmlns:xi="http://www.w3.org/2001/XInclude">
+
+<resistance>
+  <strength>10</strength>
+  <screen_edge_strength>20</screen_edge_strength>
+</resistance>
+
+<focus>
+  <focusNew>yes</focusNew>
+  <followMouse>no</followMouse>
+  <focusLast>yes</focusLast>
+  <underMouse>no</underMouse>
+  <focusDelay>200</focusDelay>
+  <raiseOnFocus>no</raiseOnFocus>
+</focus>
+
+<placement>
+  <policy>Smart</policy>
+  <center>yes</center>
+  <monitor>Primary</monitor>
+  <primaryMonitor>1</primaryMonitor>
+</placement>
+
+<theme>
+  <name>Clearlooks</name>
+  <!-- N: icon, L: title, M: maximize, C: close -->
+  <titleLayout>NLMC</titleLayout>
+  <keepBorder>yes</keepBorder>
+  <animateIconify>no</animateIconify>
+  <font place="ActiveWindow"><name>sans</name><size>9</size><weight>bold</weight><slant>normal</slant></font>
+  <font place="InactiveWindow"><name>sans</name><size>9</size><weight>bold</weight><slant>normal</slant></font>
+  <font place="MenuHeader"><name>sans</name><size>9</size><weight>normal</weight><slant>normal</slant></font>
+  <font place="MenuItem"><name>sans</name><size>9</size><weight>normal</weight><slant>normal</slant></font>
+  <font place="ActiveOnScreenDisplay"><name>sans</name><size>9</size><weight>bold</weight><slant>normal</slant></font>
+  <font place="InactiveOnScreenDisplay"><name>sans</name><size>9</size><weight>bold</weight><slant>normal</slant></font>
+</theme>
+
+<desktops>
+  <number>1</number>
+  <firstdesk>1</firstdesk>
+  <popupTime>0</popupTime>
+</desktops>
+
+<resize>
+  <drawContents>yes</drawContents>
+  <popupShow>Never</popupShow>
+</resize>
+
+<margins><top>0</top><bottom>0</bottom><left>0</left><right>0</right></margins>
+
+<keyboard>
+  <chainQuitKey>C-g</chainQuitKey>
+  <keybind key="A-F4"><action name="Close"/></keybind>
+</keyboard>
+
+<mouse>
+  <dragThreshold>1</dragThreshold>
+  <doubleClickTime>500</doubleClickTime>
+  <screenEdgeWarpTime>0</screenEdgeWarpTime>
+  <screenEdgeWarpMouse>false</screenEdgeWarpMouse>
+
+  <context name="Frame">
+    <mousebind button="A-Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    <mousebind button="A-Left" action="Drag"><action name="Move"/></mousebind>
+  </context>
+
+  <context name="Titlebar">
+    <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
+    <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximize"/></mousebind>
+  </context>
+
+  <context name="Titlebar Top Right Bottom Left TLCorner TRCorner BRCorner BLCorner">
+    <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+  </context>
+
+  <context name="Top">
+    <mousebind button="Left" action="Drag"><action name="Resize"><edge>top</edge></action></mousebind>
+  </context>
+  <context name="Left">
+    <mousebind button="Left" action="Drag"><action name="Resize"><edge>left</edge></action></mousebind>
+  </context>
+  <context name="Right">
+    <mousebind button="Left" action="Drag"><action name="Resize"><edge>right</edge></action></mousebind>
+  </context>
+  <context name="Bottom">
+    <mousebind button="Left" action="Drag"><action name="Resize"><edge>bottom</edge></action></mousebind>
+  </context>
+  <context name="TRCorner BRCorner TLCorner BLCorner">
+    <mousebind button="Left" action="Drag"><action name="Resize"/></mousebind>
+  </context>
+
+  <context name="Client">
+    <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    <mousebind button="Middle" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    <mousebind button="Right" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+  </context>
+
+  <context name="Maximize">
+    <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    <mousebind button="Left" action="Click"><action name="ToggleMaximize"/></mousebind>
+  </context>
+
+  <context name="Close">
+    <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+    <mousebind button="Left" action="Click"><action name="Close"/></mousebind>
+  </context>
+</mouse>
+
+<menu>
+  <hideDelay>200</hideDelay>
+  <middle>no</middle>
+  <submenuShowDelay>100</submenuShowDelay>
+  <submenuHideDelay>400</submenuHideDelay>
+  <showIcons>no</showIcons>
+  <manageDesktops>no</manageDesktops>
+</menu>
+
+<applications>
+  <!-- The Fishbowl Client's main window fills the browser tab and follows it
+       when the tab is resized. Its title is "Fishbowl Client" when it appears
+       (the company and user are added later). Its dialogs and Server
+       Administration stay as they are. -->
+  <application title="Fishbowl Client*" type="normal">
+    <maximized>yes</maximized>
+    <focus>yes</focus>
+  </application>
+</applications>
+
+</openbox_config>

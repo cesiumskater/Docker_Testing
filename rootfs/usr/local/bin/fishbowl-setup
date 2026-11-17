@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# fishbowl-setup: first-time setup at a terminal instead of on the Fishbowl page.
+#
+#   docker exec -it fishbowl fishbowl-setup
+#
+# Asks the same four things as the page's setup form (license agreement, license
+# key or trial, company name, MySQL root password) and hands the answers to the
+# container, which installs on its own.
+
+# shellcheck source=/dev/null
+. /usr/local/lib/fishbowl/common.sh
+# shellcheck source=/dev/null
+. "$LIB_DIR/setup.sh"
+
+[ "$(id -u)" = 0 ] || fail 1 "Run it as root: docker exec -it <container> fishbowl-setup"
+case "$(current_status)" in
+  needs-setup) ;;
+  setup) fail 1 "Setup is already running. Follow it with: docker logs -f <container>" ;;
+  *)
+    if setup_complete; then
+      fail 1 "Fishbowl is already installed in these volumes ($(installed_version))."
+    fi
+    fail 1 "The container isn't waiting for first-time setup right now (status: $(current_status))." ;;
+esac
+is_interactive || fail 1 "fishbowl-setup asks questions, so it needs a terminal: docker exec -it <container> fishbowl-setup (or use the Fishbowl page)."
+trap 'setup_cleanup' EXIT
+
+if grep -qx 'volumes=unnamed' "$INFO_FILE" 2>/dev/null; then
+  hr
+  note "This container has no named volumes: Docker gave it unnamed ones, which belong"
+  note "to this one container. A new container won't find them by itself, and removing"
+  note "this container together with its volumes deletes your Fishbowl install and"
+  note "database. The container's log (docker logs) has the commands that fix this."
+  answer=""
+  ask answer "Install here anyway? [y/N] " || exit 3
+  case "$answer" in
+    [yY]|[yY][eE][sS]) ;;
+    *) note "Nothing was installed."; exit 1 ;;
+  esac
+fi
+
+collect_answers
+SETUP_SECRETS="$(secret_dir)"
+write_answers "$SETUP_SECRETS/answers" setup
+rm -f "$LAST_ERROR_FILE"
+web_request setup "$SETUP_SECRETS/answers"
+setup_cleanup
+
+note ""
+note "Installing now; this takes a minute or two. The container log shows each step"
+note "(docker logs -f <container>), and so does the Fishbowl page."
+seen=0
+for _ in $(seq 1 900); do
+  sleep 2
+  status="$(current_status)"
+  if [ "$status" = setup ]; then seen=1; continue; fi
+  if setup_complete; then
+    note ""
+    note "Fishbowl $FISHBOWL_APP_VERSION is installed. Next: your company database (restore a .sql"
+    note "backup or create a new one) in Server Administration, on the Fishbowl page:"
+    note ""
+    note "    $(page_url)"
+    exit 0
+  fi
+  if [ "$status" = needs-setup ] && { [ "$seen" = 1 ] || [ -s "$LAST_ERROR_FILE" ]; }; then
+    note ""
+    note "Setup did not finish, and nothing is installed:"
+    note "  $(cat "$LAST_ERROR_FILE" 2>/dev/null || echo "the container log has the reason (docker logs <container>)")"
+    exit 1
+  fi
+done
+fail 1 "Setup is taking unusually long; check docker logs <container>."

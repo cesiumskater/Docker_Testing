@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# fishbowl-session: one Fishbowl desktop program on its own virtual screen, shown
+# in a browser tab by the Fishbowl page.
+#
+#   fishbowl-session run admin|client [WIDTHxHEIGHT]   (started by the entrypoint)
+#   fishbowl-session stop admin|client
+#
+#   admin   Fishbowl Server Administration   screen :1
+#   client  Fishbowl Client                  screen :2
+#
+# Each window gets a private X/VNC server (TigerVNC's Xvnc, which can change
+# size to fit the browser tab), a small window manager (openbox) and a WebSocket
+# bridge (websockify) for the noVNC viewer in the browser. Everything listens on
+# Unix sockets under /run/fishbowl, not on TCP ports: the only way in is through
+# the page's server, which checks the access code first. All of it runs as the
+# fishbowl user and stops when the program closes.
+
+# shellcheck source=/dev/null
+. /usr/local/lib/fishbowl/common.sh
+
+ACTION="${1:-}"
+NAME="${2:-}"
+GEOMETRY="${3:-}"
+
+case "$NAME" in
+  admin)  DISPLAY_NUM=1; LAUNCHER="$FB_ADMIN_LAUNCHER";  TITLE="Fishbowl Server Administration" ;;
+  client) DISPLAY_NUM=2; LAUNCHER="$FB_CLIENT_LAUNCHER"; TITLE="Fishbowl Client" ;;
+  *) fail 2 "usage: fishbowl-session run|stop admin|client [WIDTHxHEIGHT]" ;;
+esac
+[ "$(id -u)" = 0 ] || fail 1 "Run as root."
+
+readonly STATE="$RUN_DIR/session-$NAME"          # "starting" / "ready"; the page reads it
+readonly PIDFILE="$RUN_DIR/session-$NAME.pid"
+readonly LOCK="$RUN_DIR/session-$NAME.lock"
+readonly RFB_SOCK="$X_DIR/$NAME.rfb"
+readonly WS_SOCK="$WS_DIR/$NAME.sock"
+readonly SESSION_LOG="$LOG_DIR/session-$NAME.log"
+
+session_stop() {
+  local pid
+  pid="$(cat "$PIDFILE" 2>/dev/null || true)"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  for _ in $(seq 1 100); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.2
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  return 0
+}
+
+if [ "$ACTION" = stop ]; then
+  session_stop
+  exit 0
+fi
+[ "$ACTION" = run ] || fail 2 "usage: fishbowl-session run|stop admin|client [WIDTHxHEIGHT]"
+
+setup_complete || fail 1 "Fishbowl isn't installed yet."
+[ -x "$LAUNCHER" ] || fail 1 "$LAUNCHER is missing; is Fishbowl installed?"
+
+# The browser tab says how big it is, so the window opens at a size that fits.
+if [[ "$GEOMETRY" =~ ^([0-9]{3,4})x([0-9]{3,4})$ ]] &&
+   [ "${BASH_REMATCH[1]}" -ge 800 ] && [ "${BASH_REMATCH[1]}" -le 3840 ] &&
+   [ "${BASH_REMATCH[2]}" -ge 600 ] && [ "${BASH_REMATCH[2]}" -le 2160 ]; then
+  :
+else
+  GEOMETRY=1280x800
+fi
+
+mkdir -p "$RUN_DIR"
+exec 8>"$LOCK"
+if ! flock -n 8; then
+  if [ -e "$STATE" ]; then
+    exit 0   # this window is already open (or opening); the browser tab just connects to it
+  fi
+  flock -w 20 8 || exit 0   # the previous one is still closing: wait for it to finish
+fi
+printf '%s\n' "$$" > "$PIDFILE"
+printf 'starting\n' > "$STATE"
+
+CHILD_PIDS=()
+cleanup() {
+  set +o errexit
+  local pid
+  rm -f "$STATE"   # first: the page then says "closed" instead of trying to reconnect
+  for pid in "${CHILD_PIDS[@]}"; do
+    kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  done
+  sleep 1
+  for pid in "${CHILD_PIDS[@]}"; do
+    kill -KILL -- "-$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  done
+  rm -f "$RFB_SOCK" "$WS_SOCK" "/tmp/.X11-unix/X$DISPLAY_NUM" "/tmp/.X$DISPLAY_NUM-lock"
+  if [ "$(cat "$PIDFILE" 2>/dev/null)" = "$$" ]; then rm -f "$PIDFILE"; fi
+}
+trap cleanup EXIT
+trap 'exit 143' TERM INT HUP
+
+# Runs a command as the fishbowl user in its own session/process group, with a
+# clean environment (and without this script's lock).
+spawn() {
+  setsid setpriv --reuid="$FB_USER" --regid="$FB_USER" --init-groups --inh-caps=-all -- \
+    env -i PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
+      HOME="$HOMES_DIR/$FB_USER" USER="$FB_USER" LOGNAME="$FB_USER" \
+      LANG="${LANG:-C.UTF-8}" TZ="${TZ:-UTC}" JAVA_HOME="$JAVA21_HOME" DISPLAY=":$DISPLAY_NUM" \
+      INSTALL4J_JAVA_HOME_OVERRIDE="$JAVA21_HOME" INSTALL4J_JAVA_HOME="$JAVA21_HOME" "$@" 8>&- &
+  CHILD_PIDS+=("$!")
+}
+wait_for_socket() {  # wait_for_socket PATH SECONDS
+  for _ in $(seq 1 $(( $2 * 5 ))); do
+    [ -S "$1" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+fix_ownership
+prepare_import_dir   # .sql files uploaded or copied in become readable by Server Administration
+mkdir -p "$X_DIR" "$WS_DIR" /tmp/.X11-unix
+chown "$FB_USER:$FB_USER" "$X_DIR";  chmod 0700 "$X_DIR"
+chown "$FB_USER:$WEB_USER" "$WS_DIR"; chmod 0750 "$WS_DIR"
+chmod 1777 /tmp/.X11-unix
+rm -f "$RFB_SOCK" "$WS_SOCK" "/tmp/.X11-unix/X$DISPLAY_NUM" "/tmp/.X$DISPLAY_NUM-lock"
+: > "$SESSION_LOG"
+
+# No VNC password and no TCP port: the VNC socket is readable by fishbowl only,
+# and the page's server checks the access code before it connects anyone.
+spawn Xvnc ":$DISPLAY_NUM" -geometry "$GEOMETRY" -depth 24 -dpi 96 -desktop "$TITLE" \
+  -SecurityTypes None -rfbunixpath "$RFB_SOCK" -rfbport -1 -nolisten tcp \
+  -AlwaysShared -AcceptSetDesktopSize=1 >>"$SESSION_LOG" 2>&1
+{ wait_for_socket "/tmp/.X11-unix/X$DISPLAY_NUM" 15 && wait_for_socket "$RFB_SOCK" 15; } ||
+  fail 1 "The virtual screen for $TITLE (Xvnc) did not start; see $SESSION_LOG"
+
+spawn openbox --config-file "$LIB_DIR/openbox-rc.xml" >>"$SESSION_LOG" 2>&1
+spawn websockify --unix-listen="$WS_SOCK" --unix-listen-mode=0666 --unix-target="$RFB_SOCK" >>"$SESSION_LOG" 2>&1
+wait_for_socket "$WS_SOCK" 20 ||
+  fail 1 "The browser connection for $TITLE (websockify) did not start; see $SESSION_LOG"
+
+eve_before="$(sha256sum < "$FB_EVE" 2>/dev/null || true)"
+cd "$(dirname "$LAUNCHER")"
+spawn "$LAUNCHER" >>"$SESSION_LOG" 2>&1
+APP_PID="${CHILD_PIDS[-1]}"
+cd /
+printf 'ready\n' > "$STATE"
+log "$TITLE is open in its browser window"
+
+wait "$APP_PID" || true
+
+if [ "$NAME" = admin ]; then
+  # Fishbowl Server writes its old settings back when it stops; keep the new ones
+  # for the next start (see save_pending_settings).
+  case "$(current_status)" in
+    running|starting|stopping-server)
+      if [ "$(sha256sum < "$FB_EVE" 2>/dev/null || true)" != "$eve_before" ]; then
+        save_pending_settings
+        log "Server Administration changed Fishbowl Server's settings. They take effect when Fishbowl Server restarts (Restart on the Fishbowl page; this disconnects Fishbowl Clients)."
+      fi ;;
+  esac
+  fix_ownership
+fi
+log "$TITLE closed"

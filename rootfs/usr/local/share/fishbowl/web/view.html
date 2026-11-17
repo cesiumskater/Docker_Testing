@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fishbowl</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/style.css">
+<script type="module" src="/static/view.js"></script>
+</head>
+<body class="view">
+<header class="topbar">
+  <h1 id="title">Fishbowl</h1>
+  <span class="pill" id="conn">Opening…</span>
+  <span class="grow"></span>
+  <button type="button" id="toggle-side">Steps and clipboard</button>
+  <a class="button" href="/">Fishbowl page</a>
+  <button type="button" id="force-close" class="danger" data-confirm="Click again to force it closed (unsaved changes are lost)">Force close</button>
+</header>
+<div id="stage">
+  <div id="scroller">
+    <div id="screen"></div>
+    <div id="overlay">
+      <div class="card">
+        <div class="status">
+          <span class="dot busy" id="overlay-dot"></span>
+          <div>
+            <h2 id="overlay-title">Opening…</h2>
+            <p id="overlay-text" class="muted"></p>
+          </div>
+        </div>
+        <div class="actions" id="overlay-actions" hidden>
+          <button type="button" class="primary" id="overlay-open">Open it again</button>
+          <a class="button" href="/">Go to the Fishbowl page</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <aside id="side" hidden>
+    <section>
+      <h2>Clipboard</h2>
+      <p class="hint">To paste into the Fishbowl window: put the text in this box, click the field in the window, then press Ctrl+V. Text you copy inside the window shows up here.</p>
+      <textarea id="clip" spellcheck="false" autocomplete="off" aria-label="Clipboard text"></textarea>
+      <p><button type="button" id="clip-clear">Clear</button></p>
+    </section>
+
+    <section class="for-admin" hidden>
+      <h2>Restore a backup (.sql)</h2>
+      <p class="hint" id="side-files">Upload the file on the Fishbowl page first.</p>
+      <ol>
+        <li><strong>Restore</strong> tab → the magnifier next to <strong>Restore File</strong> → double-click <strong>import</strong> → your file → <strong>Open</strong>.</li>
+        <li><strong>Database:</strong> check the name. A new name is the safe choice; an existing name is replaced.</li>
+        <li><strong>Password:</strong> clear the field, type your MySQL root password.</li>
+        <li><strong>Restore</strong> → <strong>Yes</strong> → wait for "Database has been restored." → <strong>OK</strong>.</li>
+        <li><strong>Database</strong> tab → click the restored database in the list → <strong>OK</strong> → <strong>OK</strong>.</li>
+      </ol>
+    </section>
+    <section class="for-admin" hidden>
+      <h2>Create a new database</h2>
+      <ol>
+        <li><strong>Database</strong> tab → green <strong>+</strong>.</li>
+        <li>A database name (letters, numbers, underscores). Clear <strong>Password</strong> and type your MySQL root password → <strong>Connect</strong>.</li>
+        <li>Choose your country and costing method (this can't be changed later) → <strong>OK</strong>, and wait.</li>
+        <li><strong>OK</strong> → <strong>OK</strong>.</li>
+      </ol>
+      <p class="hint">Changed something while Fishbowl Server is running? It takes effect after <strong>Restart Fishbowl Server</strong> on the Fishbowl page.</p>
+    </section>
+
+    <section class="for-client" hidden>
+      <h2>The Fishbowl Client</h2>
+      <p class="hint">This is the Client installed inside the container, connected to the Fishbowl Server next to it. Everyone who opens this page shares this one window.</p>
+      <p class="hint">Closing the Client's own window ends it. You can open it again from the Fishbowl page.</p>
+    </section>
+  </aside>
+</div>
+</body>
+</html>

@@ -1,12 +1,19 @@
 # shellcheck shell=bash
-# First-run setup: four questions, then an unattended install.
-# Sourced by fishbowl-entrypoint (common.sh is already loaded).
+# shellcheck disable=SC2034  # ANSWER_METHOD and UPG_PW are read by the scripts that source this file
+# First-time setup: the questions, the answers file, and the unattended install.
+# Sourced by fishbowl-entrypoint and fishbowl-setup (common.sh is already loaded).
+#
+# The questions are asked in one of two places: the setup form on the Fishbowl
+# page, or `fishbowl-setup` at a terminal. Either way the answers reach the
+# entrypoint as a small file in RAM (see write_answers / read_answers), and the
+# same perform_install runs.
 
 SETUP_TRIAL=0
 SETUP_COMPANY=""
 SETUP_KEY=""
 SETUP_PW=""
 SETUP_SECRETS=""   # /dev/shm directory, removed by setup_cleanup
+ANSWER_METHOD=""   # how the license agreement was accepted, for the record kept on the data volume
 
 setup_cleanup() {
   SETUP_KEY=""; SETUP_PW=""
@@ -16,6 +23,7 @@ setup_cleanup() {
   SETUP_SECRETS=""
 }
 
+# ---------------------------------------------------------------- the rules --
 # MySQL 8.4 MEDIUM policy: length >= 8, upper and lower case, a digit, a special character.
 password_problems() {
   local p="$1" missing=()
@@ -29,15 +37,23 @@ password_problems() {
     local IFS=';'; printf '%s' "${missing[*]}"
   fi
 }
-
-print_rerun_hint() {
-  note ""
-  note "Nothing was installed. When you're ready, run setup again at a terminal:"
-  note ""
-  print_setup_command
+key_looks_valid() { [ "${#1}" -ge 5 ] && ! [[ "$1" =~ [^[:graph:]] ]]; }
+company_problem() {
+  if [ -z "$1" ]; then printf "The company name can't be empty."
+  elif [[ "$1" =~ [[:cntrl:]] ]]; then printf 'The company name contains control characters.'
+  elif [ "${#1}" -gt 200 ]; then printf 'The company name is longer than 200 characters.'
+  fi
 }
 
-# ------------------------------------------------------------------ questions
+# ----------------------------------------------------- questions (terminal) --
+print_rerun_hint() {
+  note ""
+  note "Nothing was installed. When you're ready, run fishbowl-setup again, or use"
+  note "the setup form on the Fishbowl page."
+}
+
+# Asks the four questions at a terminal and leaves the answers in SETUP_*.
+# Exits 1 when the license agreement is declined, 3 when nobody answers.
 collect_answers() {
   hr
   note " Fishbowl Advanced $FISHBOWL_APP_VERSION - first-time setup"
@@ -54,7 +70,7 @@ collect_answers() {
 
   # 1. EULA -------------------------------------------------------------------
   local rc=0
-  eula_accept "$FISHBOWL_VERSION" || rc=$?
+  eula_accept || rc=$?
   if [ "$rc" = 2 ]; then
     note ""
     note "No answer came from the terminal, so setup stopped without accepting anything."
@@ -84,7 +100,7 @@ collect_answers() {
       note "Using the 14 Day Fishbowl Trial."
       break
     fi
-    if [ "${#key}" -lt 5 ] || [[ "$key" =~ [^[:graph:]] ]]; then
+    if ! key_looks_valid "$key"; then
       note "That doesn't look like a license key. Paste the whole key, or type trial."
       continue
     fi
@@ -101,13 +117,12 @@ collect_answers() {
   if [ "$SETUP_TRIAL" = 0 ]; then
     hr
     note "Company name, exactly as it appears on your Fishbowl license."
-    local name=""
+    local name="" problem=""
     while :; do
       ask name "Company name: " || { print_rerun_hint; exit 3; }
       name="$(printf '%s' "$name" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-      if [ -z "$name" ]; then note "The company name can't be empty."; continue; fi
-      if [[ "$name" =~ [[:cntrl:]] ]]; then note "The name contains control characters; type it again."; continue; fi
-      if [ "${#name}" -gt 200 ]; then note "That's longer than 200 characters; type it again."; continue; fi
+      problem="$(company_problem "$name")"
+      if [ -n "$problem" ]; then note "$problem Type it again."; continue; fi
       break
     done
     SETUP_COMPANY="$name"
@@ -118,8 +133,9 @@ collect_answers() {
   hr
   note "MySQL root password"
   note "Fishbowl's database runs in MySQL inside this container. Choose a password for"
-  note "MySQL's root user; you'll type it again when you create the Fishbowl database in"
-  note "Server Administration, and when upgrading. It isn't stored anywhere in plain text."
+  note "MySQL's root user; you'll type it again when you create or restore the Fishbowl"
+  note "database in Server Administration, and when upgrading. It isn't stored anywhere"
+  note "in plain text."
   note "Rules (MySQL MEDIUM policy): at least 8 characters, upper- and lower-case"
   note "letters, a digit, and a special character."
   local pw1="" pw2="" problems=""
@@ -152,6 +168,107 @@ collect_answers() {
   hr
 }
 
+# ------------------------------------------------------------ answers file --
+# One "name=value" per line; values never contain a line break (checked on both
+# sides). The file lives in /dev/shm (RAM) for the moment between the question
+# and the install, mode 0600.
+#
+#   fishbowl-answers 1
+#   kind=setup | upgrade
+#   via=page | terminal            where the license agreement was accepted
+#   eula=accepted
+#   eula_sha256=<SHA-256 of the license text that was shown>
+#   license=trial | key            (setup)
+#   key=...  company=...           (setup with a key)
+#   password=<MySQL root password> (setup: the one to set; upgrade: the current one)
+write_answers() {  # write_answers FILE setup|upgrade   (from SETUP_* / UPG_PW; terminal commands only)
+  local f="$1" kind="$2"
+  (
+    umask 077
+    {
+      printf 'fishbowl-answers 1\n'
+      printf 'kind=%s\n' "$kind"
+      printf 'via=terminal\n'
+      printf 'eula=accepted\n'
+      printf 'eula_sha256=%s\n' "$(eula_sha256)"
+      if [ "$kind" = setup ]; then
+        if [ "$SETUP_TRIAL" = 1 ]; then
+          printf 'license=trial\n'
+        else
+          printf 'license=key\n'
+          printf 'key=%s\n' "$SETUP_KEY"
+          printf 'company=%s\n' "$SETUP_COMPANY"
+        fi
+        printf 'password=%s\n' "$SETUP_PW"
+      else
+        printf 'password=%s\n' "${UPG_PW:-}"
+      fi
+    } > "$f"
+  )
+}
+
+# Reads an answers file into SETUP_* (setup) or UPG_PW (upgrade), checking every
+# value again: the page's server is a separate, less trusted program. The file is
+# removed as soon as it has been read, unless the third argument is "keep".
+read_answers() {  # read_answers FILE setup|upgrade [keep]
+  local file="$1" kind="$2" keep="${3:-}" line k v first=1 header="" problem
+  local a_kind="" a_via="" a_eula="" a_sha="" a_license="" a_key="" a_company="" a_pw=""
+  { [ -f "$file" ] && [ ! -L "$file" ]; } || fail 1 "The answers are missing; nothing was changed. Please try again."
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$first" = 1 ]; then
+      first=0
+      header="$line"
+      continue
+    fi
+    k="${line%%=*}"; v="${line#*=}"
+    case "$k" in
+      kind) a_kind="$v" ;;
+      via) a_via="$v" ;;
+      eula) a_eula="$v" ;;
+      eula_sha256) a_sha="$v" ;;
+      license) a_license="$v" ;;
+      key) a_key="$v" ;;
+      company) a_company="$v" ;;
+      password) a_pw="$v" ;;
+    esac
+  done < "$file"
+  [ "$keep" = keep ] || rm -f -- "$file"
+
+  [ "$header" = "fishbowl-answers 1" ] || fail 1 "The answers arrived in a form this version doesn't understand; nothing was changed."
+  [ "$a_kind" = "$kind" ] || fail 1 "These answers are for something else ($a_kind, not $kind); nothing was changed."
+  # Only an explicit acceptance of the license text this image carries counts.
+  [ "$a_eula" = accepted ] || fail 1 "Fishbowl's license agreement was not accepted, so nothing was changed."
+  [ "$a_sha" = "$(eula_sha256)" ] ||
+    fail 1 "The license agreement that was accepted is not the one in this image (the page may have been open since before an update). Reload the page, read the agreement shown there, and try again."
+  case "$a_via" in
+    terminal) ANSWER_METHOD='typed "yes" at a terminal (docker exec)' ;;
+    *)        ANSWER_METHOD='ticked "I have read and accept" and submitted the form on the Fishbowl page' ;;
+  esac
+  if [[ "$a_pw" =~ [[:cntrl:]] ]]; then fail 1 "The MySQL root password contains control characters; nothing was changed."; fi
+
+  if [ "$kind" = upgrade ]; then
+    [ -n "$a_pw" ] || fail 1 "The MySQL root password is missing; nothing was changed."
+    UPG_PW="$a_pw"; a_pw=""
+    return 0
+  fi
+
+  problem="$(password_problems "$a_pw")"
+  [ -z "$problem" ] || fail 1 "The MySQL root password is missing: ${problem//;/, }. Nothing was installed."
+  case "$a_license" in
+    trial)
+      SETUP_TRIAL=1; SETUP_KEY=""; SETUP_COMPANY="" ;;
+    key)
+      a_key="$(printf '%s' "$a_key" | tr -d '[:space:]')"
+      key_looks_valid "$a_key" || fail 1 "That doesn't look like a license key. Nothing was installed."
+      a_company="$(printf '%s' "$a_company" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      problem="$(company_problem "$a_company")"
+      [ -z "$problem" ] || fail 1 "$problem Nothing was installed."
+      SETUP_TRIAL=0; SETUP_KEY="$a_key"; SETUP_COMPANY="$a_company" ;;
+    *) fail 1 "Choose a license key or the trial. Nothing was installed." ;;
+  esac
+  SETUP_PW="$a_pw"; a_pw=""; a_key=""
+}
+
 # -------------------------------------------------------------- automation --
 mysql_initialize() {
   log "Initializing MySQL 8.4 with lower_case_table_names=1 already configured"
@@ -159,7 +276,7 @@ mysql_initialize() {
   touch "$LOG_DIR/mysqld.log"; chown mysql:mysql "$LOG_DIR/mysqld.log"
   if ! mysqld --initialize-insecure --user=mysql --log-error="$LOG_DIR/mysqld.log" >/dev/null 2>&1; then
     tail -n 20 "$LOG_DIR/mysqld.log" >&2 || true
-    fail 1 "MySQL could not initialize its data directory (messages above)."
+    fail 1 "MySQL could not initialize its data directory (messages in the container log)."
   fi
 }
 
@@ -178,7 +295,7 @@ mysql_verify() {
   IFS=$'\t' read -r version lctn mode <<<"$out"
   log "MySQL reports version $version, lower_case_table_names=$lctn, sql_mode=$mode"
   [[ "$version" == 8.4.* ]] || fail 1 "MySQL reports version $version; Fishbowl needs 8.4.x. Stopping before the Fishbowl installer runs."
-  [ "$lctn" = 1 ] || fail 1 "MySQL reports lower_case_table_names=$lctn, but Fishbowl needs 1, and it can only be set when the data directory is created. Stopping before the Fishbowl installer runs. Start the container again: setup will wipe this unfinished MySQL data directory and start over."
+  [ "$lctn" = 1 ] || fail 1 "MySQL reports lower_case_table_names=$lctn, but Fishbowl needs 1, and it can only be set when the data directory is created. Stopping before the Fishbowl installer runs. Trying setup again wipes this unfinished MySQL data directory and starts over."
 }
 
 # Guide Step 7.
@@ -205,7 +322,7 @@ set_auto_updates_default() {
 }
 
 # install4j response file. agreed=0 is "I have read and accept the agreement";
-# it is only ever written after the person typed "yes" above.
+# it is only ever written after the person accepted the agreement themselves.
 # shellcheck disable=SC2016  # "$Integer" / "$Boolean" are literal install4j type suffixes
 write_varfile() {  # write_varfile <path> <trial 0|1> ; company/key come from SETUP_* vars
   local f="$1" trial="$2"
@@ -232,6 +349,9 @@ write_varfile() {  # write_varfile <path> <trial 0|1> ; company/key come from SE
   chmod 0600 "$f"
 }
 
+# Installs MySQL's data directory and Fishbowl from the answers in SETUP_*.
+# Any failure exits (the caller's EXIT trap stops MySQL and clears the secrets);
+# trying again starts from a clean slate.
 perform_install() {
   local logfile
   logfile="$LOG_DIR/setup-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -253,8 +373,14 @@ perform_install() {
   local rc=0
   run_installer "$SETUP_SECRETS/response.varfile" "$logfile" || rc=$?
   rm -f "$SETUP_SECRETS/response.varfile"
-  [ "$rc" = 0 ] || fail 1 "The Fishbowl installer exited with status $rc. Its output is in $logfile (no secrets in it). Start the container again to retry setup from scratch."
-  [ -f "$FB_EVE" ] && [ -x "$FB_SERVICE_LAUNCHER" ] ||
+  if [ "$rc" != 0 ]; then
+    local why=""
+    if grep -q "Not enough disk space" "$logfile" 2>/dev/null; then
+      why=" Docker is out of disk space: free some (docker system df shows what uses it) and try again."
+    fi
+    fail 1 "The Fishbowl installer exited with status $rc.$why Its output is in $logfile (no secrets in it)."
+  fi
+  { [ -f "$FB_EVE" ] && [ -x "$FB_SERVICE_LAUNCHER" ]; } ||
     fail 1 "The installer finished but $FB_EVE or the server launcher is missing. See $logfile."
 
   log "Post-install (guide Section 8): ownership, Fishbowl's my.cnf, MySQL restart"
@@ -267,7 +393,7 @@ perform_install() {
   mysql_stop
 
   verify_memory_settings ||
-    fail 1 "Fishbowl's memory settings did not come out as ${SERVER_MEMORY_MB} MB server / ${CLIENT_MEMORY_MB} MB client (details above)."
+    fail 1 "Fishbowl's memory settings did not come out as ${SERVER_MEMORY_MB} MB server / ${CLIENT_MEMORY_MB} MB client (details in the container log)."
   log "Memory settings verified: server -Xmx${SERVER_MEMORY_MB}M, client -Xmx${CLIENT_MEMORY_MB}M"
 
   write_state installed-version "$FISHBOWL_VERSION"
@@ -277,9 +403,4 @@ perform_install() {
   rm -f "$STATE_DIR/setup.in-progress"
   setup_cleanup
   log "Fishbowl $FISHBOWL_APP_VERSION is installed."
-}
-
-run_first_setup() {   # the entrypoint's EXIT trap calls setup_cleanup and stops MySQL
-  collect_answers
-  perform_install
 }

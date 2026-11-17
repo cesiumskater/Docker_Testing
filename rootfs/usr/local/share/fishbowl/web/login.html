@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fishbowl in Docker: sign in</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="center">
+<main class="card narrow">
+  <h1>Fishbowl in Docker</h1>
+  <p>This page is protected by an access code.</p>
+  <!--PROBLEM-->
+  <form method="post" action="/login">
+    <label for="code">Access code</label>
+    <input id="code" name="code" type="password" autocomplete="off" autofocus required placeholder="XXXX-XXXX-XXXX">
+    <p class="actions"><button type="submit" class="primary">Open the Fishbowl page</button></p>
+  </form>
+  <details>
+    <summary>Where do I find the code?</summary>
+    <p>The container prints a link with the code each time it starts. To see it again, run this on the computer that runs Docker:</p>
+    <pre>docker exec fishbowl fishbowl-link</pre>
+    <p class="hint"><code>fishbowl</code> is the container's name. Opening the printed link signs this browser in, so you won't need to type the code.</p>
+  </details>
+</main>
+</body>
+</html>

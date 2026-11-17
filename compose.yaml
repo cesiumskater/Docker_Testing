@@ -1,14 +1,17 @@
 # Fishbowl Advanced in Docker, with Docker Compose. See README.md.
 #
-#   First time (builds the image from GitHub, then interactive setup):
-#       docker compose run --rm --service-ports fishbowl
-#   Every day:
+#   Start (builds the image from GitHub the first time):
 #       docker compose up -d
-#   After the installer on GitHub changes (new Fishbowl version):
-#       docker compose build && docker compose stop
-#       docker compose run --rm --service-ports fishbowl     (accept the new EULA)
+#   Then open the Fishbowl page. Its link, with the access code:
+#       docker exec fishbowl fishbowl-link
+#   After the installer on GitHub changes (a new Fishbowl version):
+#       docker compose build && docker compose up -d
+#     The page then offers the upgrade; nothing changes until you accept it there.
 #
-# Volume names are fixed so `docker run` and Compose share the same data.
+# `restart: always` starts the container whenever Docker starts, even if it was
+# stopped by hand before. Docker itself has to start with the computer (README,
+# "Starting automatically"). Volume names are fixed so `docker run` and Compose
+# share the same data.
 name: fishbowl
 
 services:
@@ -20,12 +23,12 @@ services:
     pull_policy: never
     build: https://github.com/cesiumskater/Docker_Testing.git#main
     container_name: fishbowl
-    restart: unless-stopped
+    restart: always
     # Fishbowl Server and MySQL need time to shut down cleanly.
     stop_grace_period: 3m
     ports:
       - "2456:2456"            # Fishbowl Clients connect here
-      - "127.0.0.1:6080:6080"  # Server Administration in your browser; this computer only
+      - "127.0.0.1:6080:6080"  # the Fishbowl page; this computer only
     volumes:
       - fishbowl-mysql:/var/lib/mysql
       - fishbowl-app:/opt/Fishbowl

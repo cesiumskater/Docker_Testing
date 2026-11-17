@@ -5,7 +5,7 @@
 # Secrets rule for every script in this image: the License Key and the MySQL
 # root password are read without echo, never passed on a command line, never
 # exported, never logged. Temporary files that hold them live in /dev/shm
-# (RAM), mode 0600, and are deleted by a trap.
+# (RAM), mode 0600, and are deleted as soon as they have been read.
 
 set -o errexit -o nounset -o pipefail
 set +o histexpand  # passwords may contain '!'
@@ -16,6 +16,7 @@ readonly FB_BIN=/opt/Fishbowl/server/bin
 readonly FB_EVE=/opt/Fishbowl/server/bin/eve.properties
 readonly FB_SERVICE_LAUNCHER="/opt/Fishbowl/server/bin/Fishbowl Server Service"
 readonly FB_ADMIN_LAUNCHER="/opt/Fishbowl/server/bin/Fishbowl Server Administration"
+readonly FB_CLIENT_LAUNCHER="/opt/Fishbowl/client/bin/Fishbowl Client"
 readonly FB_SERVER_LOG=/opt/Fishbowl/logs/fbserver.log
 readonly MYSQL_DATA=/var/lib/mysql
 readonly MYSQL_SOCKET=/var/lib/mysql/mysql.sock
@@ -27,18 +28,33 @@ readonly STATE_DIR=/var/lib/fishbowl/state
 readonly BACKUP_DIR=/var/lib/fishbowl/backups
 readonly LOG_DIR=/var/lib/fishbowl/logs
 readonly HOMES_DIR=/var/lib/fishbowl/home
-readonly IMPORT_DIR=/var/lib/fishbowl/import   # drop .sql files here for the Restore tab
+readonly IMPORT_DIR=/var/lib/fishbowl/import   # .sql files for the Restore tab (uploaded on the page or copied in)
 readonly PENDING_EVE=/var/lib/fishbowl/state/pending-eve.properties
 readonly INSTALLER_TMP=/var/lib/fishbowl/tmp
 readonly RUN_DIR=/run/fishbowl
 readonly STATUS_FILE=/run/fishbowl/status
+readonly MESSAGE_FILE=/run/fishbowl/message          # the longer text that goes with the status
+readonly INFO_FILE=/run/fishbowl/info                # facts for the page (versions, database name); nothing secret
+readonly LAST_ERROR_FILE=/run/fishbowl/last-error    # why the last setup/upgrade/start attempt failed
+readonly PENDING_FLAG=/run/fishbowl/pending-settings # settings changed in Server Administration wait for a restart
 readonly INSTALLER_DIR=/opt/fishbowl-installer
 readonly JAVA21_HOME=/usr/lib/jvm/temurin-21-jdk
 readonly FB_USER=fishbowl
 readonly LIB_DIR=/usr/local/lib/fishbowl
+readonly BIN_DIR=/usr/local/bin
 readonly PROMPT_TIMEOUT="${FISHBOWL_PROMPT_TIMEOUT:-1800}"   # seconds per answer
-# "Press Enter" presence check: catches `docker run -t` without -i (output but no input).
+# "Press Enter" presence check: catches a terminal that shows output but can't send input.
 readonly FIRST_PROMPT_TIMEOUT="$(( PROMPT_TIMEOUT < 300 ? PROMPT_TIMEOUT : 300 ))"
+
+# The Fishbowl page: a small web server (portal.py) that runs as its own user.
+readonly WEB_USER=fbweb
+readonly WEB_PORT=6080
+readonly WEB_SPOOL=/dev/shm/fishbowl-web             # requests from the page to this script (RAM only)
+readonly WEB_CODE_FILE=/var/lib/fishbowl/state/web-code
+readonly WEB_CODE_RUN=/run/fishbowl/web-code         # copy only the page's user can read
+# Browser windows (fishbowl-session): private sockets, no TCP ports.
+readonly X_DIR=/run/fishbowl/x                       # VNC sockets, fishbowl only
+readonly WS_DIR=/run/fishbowl/ws                     # WebSocket bridges, fishbowl + the page's user
 
 # The five server launchers and two client launchers the installer writes -Xmx into.
 readonly SERVER_VMOPTIONS=(
@@ -59,19 +75,35 @@ log()  { printf '%s [fishbowl] %s\n' "$(_ts)" "$*"; }
 note() { printf '%s\n' "$*"; }
 warn() { printf '%s [warning] %s\n' "$(_ts)" "$*" >&2; }
 # fail <exit-code> <message...>
+# When FAIL_NOTE_FILE is set (a setup or upgrade started from the page or a
+# terminal command), the message is also left there for the page to show.
+FAIL_NOTE_FILE=""
 fail() {
   local code="$1"; shift
   printf '\n%s [error] %s\n\n' "$(_ts)" "$*" >&2
+  if [ -n "$FAIL_NOTE_FILE" ]; then
+    printf '%s\n' "$*" > "$FAIL_NOTE_FILE" 2>/dev/null || true
+  fi
   exit "$code"
 }
-set_status() { mkdir -p "$RUN_DIR"; printf '%s\n' "$*" > "$STATUS_FILE"; }
+# set_status <word> [text for the page]
+set_status() {
+  mkdir -p "$RUN_DIR"
+  if [ -n "${2:-}" ]; then
+    printf '%s\n' "$2" > "$MESSAGE_FILE.tmp" && mv -f "$MESSAGE_FILE.tmp" "$MESSAGE_FILE"
+  else
+    rm -f "$MESSAGE_FILE"
+  fi
+  printf '%s\n' "$1" > "$STATUS_FILE.tmp" && mv -f "$STATUS_FILE.tmp" "$STATUS_FILE"
+}
+current_status() { cat "$STATUS_FILE" 2>/dev/null || true; }
 hr() { printf '%s\n' "------------------------------------------------------------------------"; }
 
 is_interactive() { [ -t 0 ] && [ -t 1 ]; }
 
 # ----------------------------------------------------------- prompting ------
 # All prompts time out so a terminal that shows output but can't send input
-# (`docker run -t` without -i) never hangs the container.
+# never hangs a command.
 # ask <var> <prompt> [timeout]; returns 1 on EOF or timeout.
 ask() {
   local __var="$1" __prompt="$2" __t="${3:-$PROMPT_TIMEOUT}" __v=""
@@ -106,6 +138,10 @@ secret_dir() {  # prints a fresh 0700 directory in /dev/shm (RAM)
   printf '%s\n' "$d"
 }
 
+random_code() {  # random_code <length>: letters and digits that are hard to mix up
+  LC_ALL=C tr -dc 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' < /dev/urandom | head -c "$1" || true
+}
+
 # --------------------------------------------------- Java properties files --
 props_get() { python3 -I "$LIB_DIR/props.py" get "$1" "$2"; }    # props_get FILE KEY
 props_escape() { python3 -I "$LIB_DIR/props.py" escape; }          # value on stdin
@@ -129,9 +165,38 @@ image_with_tag() {
 # --------------------------------------------------------------- state ------
 setup_complete() { [ -f "$STATE_DIR/setup.complete" ]; }
 installed_version() { cat "$STATE_DIR/installed-version" 2>/dev/null || true; }
+installed_app_version() {  # what /opt/Fishbowl itself says it is (e.g. 26.10)
+  grep -o 'applicationVersion="[^"]*"' "$FB_HOME/.install4j/i4jparams.conf" 2>/dev/null | head -n 1 | cut -d'"' -f2 || true
+}
 write_state() {  # write_state FILE CONTENT  (atomic)
   local f="$STATE_DIR/$1"
   printf '%s\n' "$2" > "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+
+# Facts the page shows next to the status. Written whenever they change.
+INFO_UPGRADE_TO=""        # a newer Fishbowl in this image, waiting for the license agreement
+INFO_UPGRADE_BLOCKED=""   # "trial": Fishbowl won't update a trial's database
+INFO_VOLUMES=named        # "unnamed": Docker's anonymous volumes (container started without -v)
+publish_info() {
+  local tmp="$INFO_FILE.tmp" kind="" db=""
+  mkdir -p "$RUN_DIR"
+  if setup_complete; then
+    if installed_is_trial; then kind=trial; else kind=licensed; fi
+    db="$(eve_get dbName || true)"
+  fi
+  {
+    printf 'image_version=%s\n' "$FISHBOWL_VERSION"
+    printf 'image_app_version=%s\n' "$FISHBOWL_APP_VERSION"
+    printf 'installed_version=%s\n' "$(installed_version)"
+    printf 'install_type=%s\n' "$kind"
+    printf 'database=%s\n' "$(printf '%s' "$db" | tr -d '[:cntrl:]')"
+    printf 'client_port=%s\n' "$(client_port | tr -dc '0-9')"
+    printf 'upgrade_to=%s\n' "$INFO_UPGRADE_TO"
+    printf 'upgrade_blocked=%s\n' "$INFO_UPGRADE_BLOCKED"
+    printf 'volumes=%s\n' "$INFO_VOLUMES"
+  } > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$INFO_FILE"
 }
 
 # -------------------------------------------------------------- MySQL -------
@@ -146,6 +211,15 @@ mysql_prepare_dirs() {
 
 mysql_start() {  # starts mysqld in its own session; waits until it accepts connections
   mysql_prepare_dirs
+  # A mysqld that was killed (power loss, docker rm -f, a crash) leaves its socket
+  # lock files behind. They hold its old process number, and when that number
+  # belongs to some other process in this container, MySQL refuses to start
+  # ("Another process with pid N is using unix socket file"; seen in testing).
+  # Nothing else can be using this data directory: this container holds the lock
+  # on the volumes, and its own mysqld is not running.
+  if ! pgrep -x mysqld >/dev/null 2>&1; then
+    rm -f "$MYSQL_SOCKET" "$MYSQL_SOCKET.lock" "$MYSQL_DATA/mysqlx.sock" "$MYSQL_DATA/mysqlx.sock.lock"
+  fi
   # Container-specific options on the command line (they override option files):
   # error log on the data volume, and MySQL reachable only from inside the
   # container (Fishbowl connects over TCP to localhost:3306).
@@ -184,6 +258,8 @@ mysql_stop() {  # clean shutdown (SIGTERM is MySQL's normal shutdown signal)
   MYSQLD_PID=""
 }
 
+mysql_is_up() { mysqladmin --protocol=socket --socket="$MYSQL_SOCKET" ping --silent >/dev/null 2>&1; }
+
 # mysql_root <password-var-name> <mysql args...>  -- runs the client as root over TCP,
 # the way Fishbowl connects. The password goes through MYSQL_PWD for this one
 # process only (no command line, no disk).
@@ -216,12 +292,6 @@ apply_fishbowl_mycnf() {
 
 # --------------------------------------------------------- Fishbowl ---------
 FB_PID=""
-fishbowl_env() {
-  env -i PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
-    HOME="$HOMES_DIR/$FB_USER" USER="$FB_USER" LOGNAME="$FB_USER" LANG="${LANG:-C.UTF-8}" \
-    TZ="${TZ:-UTC}" JAVA_HOME="$JAVA21_HOME" \
-    INSTALL4J_JAVA_HOME_OVERRIDE="$JAVA21_HOME" INSTALL4J_JAVA_HOME="$JAVA21_HOME" "$@"
-}
 
 fix_ownership() {  # Section 8.1: the user that runs the server owns /opt/Fishbowl
   find "$FB_HOME" \( ! -user "$FB_USER" -o ! -group "$FB_USER" \) -exec chown -h "$FB_USER:$FB_USER" {} + 2>/dev/null || true
@@ -236,37 +306,45 @@ fix_ownership() {  # Section 8.1: the user that runs the server owns /opt/Fishbo
   chmod 0700 "$HOMES_DIR/$FB_USER"
 }
 
-# Memory: the installer reads "prior memory settings" from these files at start
-# and writes -Xmx${memoryServer}M / -Xmx${memoryClient}M back into them. Seeding
-# them before a first install makes the installer itself apply 8192/2048.
 # Fishbowl Server writes eve.properties back from memory when it stops (seen with
 # 26.10), so settings changed in Server Administration while it runs would be lost
-# at the next restart. fishbowl-admin keeps a copy of the changed file; the next
-# start of the container puts it back before Fishbowl Server reads it.
+# at the next restart. fishbowl-session keeps a copy of the changed file; the next
+# start of Fishbowl Server puts it back before the server reads it.
 save_pending_settings() {
   ( umask 077; cp "$FB_EVE" "$PENDING_EVE.tmp" ) && mv -f "$PENDING_EVE.tmp" "$PENDING_EVE"
+  # For the page: which company database is selected after the restart.
+  { eve_get dbName || true; } | tr -d '[:cntrl:]' > "$PENDING_FLAG.tmp"
+  chmod 0644 "$PENDING_FLAG.tmp"
+  mv -f "$PENDING_FLAG.tmp" "$PENDING_FLAG"
 }
 apply_pending_settings() {
+  rm -f "$PENDING_FLAG"
   [ -f "$PENDING_EVE" ] || return 0
   install -m 0600 -o "$FB_USER" -g "$FB_USER" "$PENDING_EVE" "$FB_EVE"
   rm -f "$PENDING_EVE"
-  log "Applied the settings changed in Server Administration (company database: $(eve_get dbName || echo unknown))"
+  log "Applied the settings changed in Server Administration (company database: $(eve_get dbName || echo none))"
 }
 
-# A drop folder for .sql files to restore in Server Administration (Restore tab).
-# `docker cp` delivers files owned by root, and Server Administration runs as
-# fishbowl, so they're handed over. A link in fishbowl's home puts the folder one
-# click away in Fishbowl's file chooser. Only plain files and folders are touched.
+# The drop folder for .sql files to restore in Server Administration (Restore
+# tab). Files arrive two ways: uploaded on the page (owned by the page's user)
+# or with `docker cp` (owned by root). Server Administration runs as fishbowl,
+# so the folder belongs to fishbowl, the page's group may add and remove files,
+# and nobody else gets in. A link in fishbowl's home puts the folder one click
+# away in Fishbowl's file chooser. Only plain files and folders are touched.
 prepare_import_dir() {
   mkdir -p "$IMPORT_DIR" "$HOMES_DIR/$FB_USER"
-  find "$IMPORT_DIR" -xdev \( -type f -o -type d \) \( ! -user "$FB_USER" -o ! -group "$FB_USER" \) \
-    -exec chown "$FB_USER:$FB_USER" {} + 2>/dev/null || true
-  chmod 0750 "$IMPORT_DIR"
+  find "$IMPORT_DIR" -xdev \( -type f -o -type d \) \( ! -user "$FB_USER" -o ! -group "$WEB_USER" \) \
+    -exec chown "$FB_USER:$WEB_USER" {} + 2>/dev/null || true
+  find "$IMPORT_DIR" -xdev -mindepth 1 -type f ! -perm -0640 -exec chmod u+rw,g+r {} + 2>/dev/null || true
+  chmod 2770 "$IMPORT_DIR"
   if [ ! -e "$HOMES_DIR/$FB_USER/import" ] && [ ! -L "$HOMES_DIR/$FB_USER/import" ]; then
     ln -s "$IMPORT_DIR" "$HOMES_DIR/$FB_USER/import"
   fi
 }
 
+# Memory: the installer reads "prior memory settings" from these files at start
+# and writes -Xmx${memoryServer}M / -Xmx${memoryClient}M back into them. Seeding
+# them before a first install makes the installer itself apply 8192/2048.
 seed_memory_settings() {
   local name
   mkdir -p "$FB_BIN" "$FB_HOME/client/bin"
@@ -345,7 +423,7 @@ verify_memory_settings() {  # fails if 8192 / 2048 did not take effect
 }
 
 # Runs the bundled installer unattended with the given response file.
-# Output goes to the log file only (it contains no secrets, but keeps the terminal clean).
+# Output goes to the log file only (it contains no secrets, but keeps the log clean).
 clear_installer_tmp() {
   mkdir -p "$INSTALLER_TMP"
   chmod 0700 "$INSTALLER_TMP"
@@ -364,7 +442,7 @@ run_installer() {  # run_installer <varfile> <logfile>
     cd "$INSTALLER_TMP"
     # HOME on the data volume keeps install4j's own records (previous install
     # location, JVM cache) across container re-creation, like /root on a host.
-    # stdin is /dev/null: nothing inside the installer may wait on the terminal.
+    # stdin is /dev/null: nothing inside the installer may wait on a terminal.
     exec env -i PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" HOME="$HOMES_DIR/root" \
       LANG="${LANG:-C.UTF-8}" TZ="${TZ:-UTC}" INSTALL4J_TEMP="$INSTALLER_TMP" \
       INSTALL4J_JAVA_HOME_OVERRIDE="$JAVA21_HOME" INSTALL4J_JAVA_HOME="$JAVA21_HOME" \
@@ -387,25 +465,93 @@ volume_name_for() {
   fi
 }
 
-print_setup_command() {
-  note "  docker run -it --rm --name fishbowl --stop-timeout 180 \\"
+print_run_command() {  # print_run_command [docker-only]
+  note "  docker run -d --name fishbowl --restart always --stop-timeout 180 \\"
   note "    -p 2456:2456 -p 127.0.0.1:6080:6080 \\"
   note "    -v $(volume_name_for "$MYSQL_DATA" fishbowl-mysql):/var/lib/mysql \\"
   note "    -v $(volume_name_for "$FB_HOME" fishbowl-app):/opt/Fishbowl \\"
   note "    -v $(volume_name_for "$DATA_DIR" fishbowl-data):/var/lib/fishbowl \\"
   note "    ${FISHBOWL_IMAGE:-fishbowl}"
-  note ""
-  note "or, with this repository's compose.yaml:"
-  note "  docker compose run --rm --service-ports fishbowl"
+  if [ "${1:-}" != docker-only ]; then
+    note ""
+    note "or, with this repository's compose.yaml:"
+    note "  docker compose up -d"
+  fi
   note ""
   note "(If your image has another name, use it in place of ${FISHBOWL_IMAGE:-fishbowl}.)"
 }
 
+# ------------------------------------------------------ the Fishbowl page ---
+# Whoever opens the page needs the access code. It is made once and kept on the
+# data volume so links and browser sign-ins survive restarts; `fishbowl-link
+# --new-code` replaces it. It only opens the page: MySQL and Fishbowl keep
+# their own passwords.
+web_code() { head -n 1 "$WEB_CODE_RUN" 2>/dev/null | tr -dc 'A-Z0-9-' || true; }
+web_code_init() {  # web_code_init [new]: makes sure a code exists and the page's user can read it
+  local code="" raw
+  mkdir -p "$RUN_DIR"
+  if [ "${1:-}" != new ] && [ -f "$WEB_CODE_FILE" ]; then
+    code="$(head -n 1 "$WEB_CODE_FILE" | tr -dc 'A-Z0-9-' || true)"
+  fi
+  if ! [[ "$code" =~ ^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$ ]]; then
+    raw="$(random_code 12)"
+    [ "${#raw}" = 12 ] || fail 1 "Could not generate an access code for the Fishbowl page."
+    code="${raw:0:4}-${raw:4:4}-${raw:8:4}"
+    if [ -d "$STATE_DIR" ]; then
+      ( umask 077; printf '%s\n' "$code" > "$WEB_CODE_FILE.tmp" ) && mv -f "$WEB_CODE_FILE.tmp" "$WEB_CODE_FILE"
+    fi
+  fi
+  ( umask 077; printf '%s\n' "$code" > "$WEB_CODE_RUN.tmp" )
+  chown "$WEB_USER:$WEB_USER" "$WEB_CODE_RUN.tmp"
+  chmod 0400 "$WEB_CODE_RUN.tmp"
+  mv -f "$WEB_CODE_RUN.tmp" "$WEB_CODE_RUN"
+}
+page_url() {  # page_url [path]  ->  http://localhost:6080/<path>?code=...
+  printf 'http://localhost:%s/%s?code=%s\n' "$WEB_PORT" "${1:-}" "$(web_code)"
+}
+print_page_link() {
+  hr
+  note " The Fishbowl page: setup, Server Administration and the Fishbowl Client"
+  note " in your browser. Open this on the computer that runs Docker:"
+  note ""
+  note "     $(page_url)"
+  note ""
+  note " (The link needs port $WEB_PORT published, as in the README and compose.yaml:"
+  note "  -p 127.0.0.1:$WEB_PORT:$WEB_PORT. Show it again: docker exec <container> fishbowl-link)"
+  hr
+}
+
+# Hands a request to the entrypoint, the same way the page does. For the
+# terminal commands (fishbowl-setup, fishbowl-upgrade, fishbowl-admin).
+web_request() {  # web_request NAME [FILE-WITH-CONTENT]
+  local name="$1" src="${2:-}" tmp
+  [ -d "$WEB_SPOOL" ] || fail 1 "The container isn't ready for requests yet. Is it running (docker ps)?"
+  tmp="$(mktemp "$WEB_SPOOL/.req.XXXXXX")"
+  chmod 0600 "$tmp"
+  if [ -n "$src" ]; then cat "$src" > "$tmp"; fi
+  mv -f "$tmp" "$WEB_SPOOL/$name"
+}
+
 # ---------------------------------------------------------------- EULA ------
-# Shows the license text the installer shows, then requires a typed "yes".
-# Returns 0 only on an explicit yes. Anything else, EOF or timeout: returns 1.
+eula_sha256() { sha256sum "$FISHBOWL_EULA" | cut -d' ' -f1; }
+
+record_eula_acceptance() {  # record_eula_acceptance VERSION METHOD
+  mkdir -p "$STATE_DIR/eula"
+  {
+    printf 'accepted_at=%s\n' "$(_ts)"
+    printf 'fishbowl_version=%s\n' "$1"
+    printf 'eula_file=%s\n' "$(basename "$FISHBOWL_EULA")"
+    printf 'eula_sha256=%s\n' "$(eula_sha256)"
+    printf 'method=%s\n' "$2"
+  } > "$STATE_DIR/eula/accepted-$1"
+}
+
+# Terminal version: shows the license text the installer shows, then requires a
+# typed "yes". Returns 0 only on an explicit yes; 1 on anything else; 2 when
+# nobody answered (EOF or timeout). Records nothing: the entrypoint does that
+# when it receives the answers.
 eula_accept() {
-  local version="$1" answer=""
+  local answer="" enter=""
   hr
   note "FISHBOWL LICENSE AGREEMENT (Fishbowl $FISHBOWL_APP_VERSION)"
   note ""
@@ -413,7 +559,6 @@ eula_accept() {
   note "license agreement. This is the same text Fishbowl's installer displays."
   note "It opens in a pager: Space or PgDn scrolls, q closes it."
   note ""
-  local enter=""
   if ! ask enter "Press Enter to open the license agreement... " "$FIRST_PROMPT_TIMEOUT"; then
     return 2   # nobody at the keyboard
   fi
@@ -434,14 +579,5 @@ eula_accept() {
     return 2
   fi
   answer="$(printf '%s' "$answer" | tr '[:upper:]' '[:lower:]' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  [ "$answer" = "yes" ] || return 1
-  mkdir -p "$STATE_DIR/eula"
-  {
-    printf 'accepted_at=%s\n' "$(_ts)"
-    printf 'fishbowl_version=%s\n' "$version"
-    printf 'eula_file=%s\n' "$(basename "$FISHBOWL_EULA")"
-    printf 'eula_sha256=%s\n' "$(sha256sum "$FISHBOWL_EULA" | cut -d' ' -f1)"
-    printf 'method=typed "yes" at an interactive terminal\n'
-  } > "$STATE_DIR/eula/accepted-$version"
-  return 0
+  [ "$answer" = "yes" ]
 }
