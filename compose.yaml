@@ -5,8 +5,12 @@
 #   Then open the Fishbowl page. Its link, with the access code:
 #       docker exec fishbowl fishbowl-link
 #   After the installer on GitHub changes (a new Fishbowl version):
-#       docker compose build && docker compose up -d
+#       docker compose build
+#       docker compose up -d
 #     The page then offers the upgrade; nothing changes until you accept it there.
+#
+# Run these in the folder that holds this file. They're the same on Linux,
+# macOS and Windows (PowerShell).
 #
 # `restart: always` starts the container whenever Docker starts, even if it was
 # stopped by hand before. Docker itself has to start with the computer (README,
@@ -22,6 +26,9 @@ services:
     image: fishbowl
     pull_policy: never
     build: https://github.com/cesiumskater/Docker_Testing.git#main
+    # The image is x86-64. On a Mac with Apple Silicon this has Docker build
+    # and run it under emulation; on an x86-64 computer it changes nothing.
+    platform: linux/amd64
     container_name: fishbowl
     restart: always
     # Fishbowl Server and MySQL need time to shut down cleanly.

@@ -1,9 +1,10 @@
-# Fishbowl Advanced in Docker (Linux)
+# Fishbowl Advanced in Docker
 
 One container that runs **Fishbowl Advanced Server** on Linux with everything it
-needs: **Java 21**, **MySQL 8.4**, and **Fishbowl's own Linux installer**. It
-comes with a web page, **the Fishbowl page**, where you do everything else in
-your browser:
+needs: **Java 21**, **MySQL 8.4**, and **Fishbowl's own Linux installer**. The
+Linux part lives inside the container, so the computer that runs Docker can be
+**Linux**, **macOS** or **Windows**. It comes with a web page, **the Fishbowl
+page**, where you do everything else in your browser:
 
 - first-time setup: Fishbowl's license agreement, your license key (or the
   14 Day Trial) and a MySQL root password
@@ -21,23 +22,50 @@ Repository: **https://github.com/cesiumskater/Docker_Testing**
 
 ## Quick start
 
-```bash
-# 1. Build the image straight from GitHub (this also downloads the Fishbowl installer)
-docker build -t fishbowl https://github.com/cesiumskater/Docker_Testing.git#main
-docker tag fishbowl "fishbowl:$(docker run --rm fishbowl version)"
+Docker has to be installed and running first: Docker Desktop on macOS and
+Windows, Docker Engine or Docker Desktop on Linux
+([Requirements](#2-requirements)).
 
-# 2. Start it. It starts again by itself whenever Docker starts.
-docker run -d --name fishbowl --restart always --stop-timeout 180 \
+**How the commands are written.** Linux and macOS share one set of commands,
+since bash and zsh read them the same way. Windows gets its own set, written for
+**PowerShell** (what Windows Terminal opens by default), because PowerShell
+doesn't continue a command on the next line with `\` and a few tools differ. A
+block without a label works the same on all three. Every `docker build`,
+`docker run` and `docker pull` asks for `--platform linux/amd64`: the image is
+x86-64, so the flag changes nothing on an x86-64 computer, and on a Mac with
+Apple Silicon it has Docker run the image under emulation.
+
+Each block builds the image straight from GitHub (which also downloads the
+Fishbowl installer), tags it with its Fishbowl version, starts the container,
+and prints the link to the Fishbowl page.
+
+**Linux and macOS**
+
+```bash
+docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater/Docker_Testing.git#main"
+docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
   -p 2456:2456 -p 127.0.0.1:6080:6080 \
   -e TZ=America/Denver \
   -v fishbowl-mysql:/var/lib/mysql \
   -v fishbowl-app:/opt/Fishbowl \
   -v fishbowl-data:/var/lib/fishbowl \
   fishbowl
-
-# 3. Print the link to the Fishbowl page (it includes the page's access code)
 docker exec fishbowl fishbowl-link
 ```
+
+**Windows (PowerShell)**
+
+```powershell
+docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater/Docker_Testing.git#main"
+docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
+docker exec fishbowl fishbowl-link
+```
+
+The Windows `docker run` is one long line on purpose. Pasted into PowerShell,
+the Linux and macOS version's `\` line breaks give `docker: invalid reference
+format`, then `The term '-p' is not recognized`.
 
 Open the link in a browser on the same computer. The page walks you through
 the rest: setup (about half a minute), then your company database (restore a
@@ -45,13 +73,45 @@ the rest: setup (about half a minute), then your company database (restore a
 itself. Fishbowl Clients connect to this computer's name or IP address on
 **port 2456**.
 
-With Docker Compose instead of step 2:
+`TZ` is your time zone as a name from the
+[tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones),
+such as `America/Denver` or `Europe/London`. That holds on Windows too: a
+Windows name like *Mountain Standard Time* doesn't work here.
+
+### With Docker Compose instead of `docker run`
+
+`compose.yaml` holds the same settings. Keep it in a folder of its own and run
+Compose from that folder; it builds the image from GitHub too, if it isn't
+there yet.
+
+**Linux and macOS**
 
 ```bash
+mkdir -p ~/fishbowl
+cd ~/fishbowl
 curl -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/compose.yaml
-docker compose up -d          # builds the image from GitHub too, if it isn't there yet
+docker compose up -d
 docker exec fishbowl fishbowl-link
 ```
+
+**Windows (PowerShell)**
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\fishbowl" | Out-Null
+cd "$HOME\fishbowl"
+curl.exe -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/compose.yaml
+docker compose up -d
+docker exec fishbowl fishbowl-link
+```
+
+`compose.yaml` sets `TZ` to UTC. To change it, edit `TZ:` in the file with any
+text editor and run `docker compose up -d` again; the data stays on the
+volumes.
+
+Pick either `docker run` or Compose for this container, not both: both want the
+name `fishbowl`. They use the same volumes, so switching is fine once the old
+container is gone (`docker compose down`, or `docker stop fishbowl` and then
+`docker rm fishbowl`).
 
 ## Contents
 
@@ -89,7 +149,7 @@ article says that "Linux is not officially supported, Fishbowl Support will not
 install or troubleshoot Linux", and the
 [release notes](https://help.fishbowlinventory.com/advanced/s/article/Release-Notes)
 label the Linux installer "Documentation only". The same holds for Fishbowl
-running in this container.
+running in this container, whatever system the container runs on.
 
 > **[MAINTAINER: state here whether this repository is official / endorsed by
 > Fishbowl, and where people should report problems with it.]**
@@ -119,13 +179,14 @@ MySQL 9.x and MariaDB, and its installer accepts only Java 21).
 
 | | |
 |---|---|
-| Docker | Docker Engine with BuildKit, and the Docker Compose plugin (`docker compose`) if you use Compose. Tested with Docker Engine 29.9.3. |
-| CPU | x86-64 (`linux/amd64`) only. ARM64 (including Apple Silicon running it natively) is untested. |
+| Docker | **Linux:** Docker Engine (BuildKit, its default builder) plus the Docker Compose plugin (`docker compose`) if you use Compose, or Docker Desktop for Linux. **macOS:** Docker Desktop. **Windows:** Docker Desktop in its default **Linux containers** mode. Tested with Docker Engine 29.9.3 on Linux; see [what was verified](#what-was-verified-by-running-it-and-what-wasnt) for the rest. |
+| Terminal | **Linux:** bash or zsh. **macOS:** Terminal (zsh) or any other shell. **Windows:** **PowerShell**, either the built-in Windows PowerShell 5.1 or PowerShell 7. Not Command Prompt or Git Bash: their quoting and paths differ from both sets of commands here. |
+| CPU | x86-64 (`linux/amd64`). On a Mac with Apple Silicon, Docker Desktop runs the image under emulation (slower, and untested here); turn on **Use Rosetta for x86_64/amd64 emulation on Apple Silicon** in Docker Desktop's **General** settings for the faster kind. Running natively on ARM64 is untested, and so is Windows on ARM. |
 | Internet | To build: access to GitHub, Fedora's package mirrors and Adoptium's repository. |
 | Browser | A current browser on the computer that runs Docker, for the Fishbowl page. Tested with headless Chromium. |
 | Disk | About **3.7 GB** for the image, about **1.2 GB** for a fresh install's volumes plus your databases and backups, and about **1.5 GB** of temporary space during install and upgrades. Plan on **10 GB free**. |
 | RAM | Plan on **12 GB available to Docker** for Fishbowl Server and MySQL, plus about **2 GB** while the browser windows are open. Details below. |
-| Ports | **2456** reachable by Fishbowl Clients. **6080** on 127.0.0.1 for the Fishbowl page. |
+| Ports | **2456** reachable by Fishbowl Clients. **6080** on 127.0.0.1 for the Fishbowl page. Both must be free on the computer ([a port is already in use](#a-port-is-already-in-use)). |
 
 **Why 12 GB.** This is an estimate from the configured limits, not a
 measurement under load. Fishbowl Server is set to an **8192 MB** Java heap (as
@@ -142,19 +203,51 @@ testing, the Fishbowl Client window took roughly 1.5 GB while open (it has a
 Chromium-based web view built in) and Server Administration a few hundred MB.
 They stop using memory when you close them.
 
-**Docker Desktop runs containers in a VM with its own memory limit**, which
-defaults to 50% of your computer's memory. Raise it with **Memory limit** under
-**Settings → Resources → Advanced**. On Windows with the WSL 2 backend that
-setting isn't there; the memory is set for WSL itself (Microsoft's WSL
-configuration, `.wslconfig`). Docker Desktop wasn't tested here.
+### How much memory Docker gets
+
+- **Linux with Docker Engine:** no separate limit. Containers use the
+  computer's memory.
+- **macOS, Linux with Docker Desktop, and Windows with Docker Desktop's
+  Hyper-V backend:** Docker Desktop runs containers in a virtual machine whose
+  **Memory limit** defaults to 50% of the computer's memory. Raise it in Docker
+  Desktop's settings under **Resources**, **Advanced** (Docker's documentation
+  calls the section *VM resources*).
+- **Windows with the WSL 2 backend** (Docker Desktop's usual setup): that
+  setting isn't there, because the memory belongs to WSL itself, which also
+  takes 50% of the computer's memory by default. It's set in a file named
+  `.wslconfig` in your user folder. Open it in Notepad (Notepad offers to create
+  it if it doesn't exist):
+
+  ```powershell
+  notepad "$env:USERPROFILE\.wslconfig"
+  ```
+
+  Put this in it, with the amount Docker should have, and save:
+
+  ```ini
+  [wsl2]
+  memory=14GB
+  ```
+
+  Then quit Docker Desktop, run the command below, wait a few seconds, and
+  start Docker Desktop again:
+
+  ```powershell
+  wsl --shutdown
+  ```
+
+Leave enough for the computer itself. On a computer with 16 GB of RAM that
+also runs other programs, Fishbowl can run short of memory when it gets busy.
 
 ## 3. Get the image
 
 ### Build it from GitHub (recommended)
 
-```bash
-docker build -t fishbowl https://github.com/cesiumskater/Docker_Testing.git#main
-docker tag fishbowl "fishbowl:$(docker run --rm fishbowl version)"
+The same on Linux, macOS and Windows:
+
+```sh
+docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater/Docker_Testing.git#main"
+docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
 ```
 
 Docker downloads this repository from GitHub and builds the image. The build
@@ -167,13 +260,16 @@ The second command gives the image a second name with its Fishbowl version
 (for example `fishbowl:2026.10`), so that version stays available after you
 build a newer one.
 
+The quotes around the address matter in zsh: without them, a zsh with the
+`extendedglob` option reads `#main` as part of a file pattern.
+
 ### Or let Docker Compose build it
 
 `compose.yaml` builds the same image from GitHub the first time it's needed
-(`docker compose up -d`), or on request:
+(`docker compose up -d`), or on request, in the folder that holds `compose.yaml`
+(downloading it is in the [Quick start](#with-docker-compose-instead-of-docker-run)):
 
-```bash
-curl -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/compose.yaml
+```sh
 docker compose build
 ```
 
@@ -183,15 +279,17 @@ If this repository's GitHub Actions workflow has published the image (see
 [Maintaining this repository](#14-maintaining-this-repository)), you can skip
 the build:
 
-```bash
-docker pull ghcr.io/cesiumskater/docker_testing:latest
+```sh
+docker pull --platform linux/amd64 ghcr.io/cesiumskater/docker_testing:latest
 docker tag ghcr.io/cesiumskater/docker_testing:latest fishbowl
 ```
 
 ## 4. Start it, and starting automatically
 
+**Linux and macOS**
+
 ```bash
-docker run -d --name fishbowl --restart always --stop-timeout 180 \
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
   -p 2456:2456 -p 127.0.0.1:6080:6080 \
   -e TZ=America/Denver \
   -v fishbowl-mysql:/var/lib/mysql \
@@ -200,16 +298,24 @@ docker run -d --name fishbowl --restart always --stop-timeout 180 \
   fishbowl
 ```
 
-or `docker compose up -d` with `compose.yaml` (edit `TZ` in it first).
+**Windows (PowerShell)**
+
+```powershell
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
+```
+
+or `docker compose up -d` in the folder with `compose.yaml` (edit `TZ` in it
+first).
 
 | Option | Why |
 |---|---|
 | `-d` | Runs in the background. No terminal is needed at any point. |
+| `--platform linux/amd64` | The image is x86-64. Changes nothing on an x86-64 computer; on a Mac with Apple Silicon, Docker runs it under emulation. |
 | `--restart always` | Starts the container again whenever Docker starts, and whenever it stops for a reason other than `docker stop`. |
 | `--stop-timeout 180` | Gives Fishbowl Server and MySQL up to 3 minutes to shut down cleanly. |
 | `-p 2456:2456` | Fishbowl Clients connect here. |
 | `-p 127.0.0.1:6080:6080` | The Fishbowl page, reachable from this computer only. See [Security](#13-security) before changing it. |
-| `-e TZ=…` | Your time zone (Fishbowl and MySQL use it for dates). Defaults to UTC. |
+| `-e TZ=…` | Your time zone, as a tz database name (Fishbowl and MySQL use it for dates). Defaults to UTC. |
 | the three `-v` | Your installation and data. They outlive the container: remove and recreate it any time. |
 
 **Starting automatically.** `--restart always` (Compose: `restart: always`)
@@ -218,17 +324,23 @@ container you stop by hand stays stopped only until Docker itself restarts, so
 it comes back after a reboot even if you ran `docker stop` before. Docker itself
 has to start with the computer:
 
-- **Docker Desktop:** in **Settings → General**, turn on **Start Docker Desktop
-  when you sign in to your computer** (off by default). On Linux,
-  `systemctl --user enable docker-desktop` does the same. Docker Desktop starts
-  when you *sign in*, not at boot.
-- **Docker Engine** (no Desktop; starts at boot, before anyone signs in):
-  `sudo systemctl enable --now docker`. That's the better fit for a server that
-  should run with nobody signed in.
+- **macOS and Windows (Docker Desktop):** in Docker Desktop's **Settings →
+  General**, turn on **Start Docker Desktop when you sign in to your computer**
+  (off by default). Docker Desktop starts when you *sign in*, not at boot, so
+  Fishbowl Server runs only while someone is signed in.
+- **Linux with Docker Desktop:** the same setting, or
+  `systemctl --user enable docker-desktop`. It also starts at sign-in.
+- **Linux with Docker Engine** (no Desktop; starts at boot, before anyone signs
+  in): `sudo systemctl enable --now docker`. That's the better fit for a server
+  that should run with nobody signed in.
+
+Whatever the system, a computer that sleeps takes Fishbowl Server with it, so
+turn sleep off on the one that serves Fishbowl Clients.
 
 A container you created without `--restart always` gets it with
 `docker update --restart always fishbowl`. To keep it stopped for good,
-`docker update --restart no fishbowl`, then `docker stop fishbowl`.
+`docker update --restart no fishbowl`, then `docker stop fishbowl`. Both work the
+same on every system.
 
 **Inside the container nothing waits on a terminal.** First-time setup, a
 missing company database and new-version upgrades all wait on the Fishbowl page
@@ -250,14 +362,19 @@ page can't be reached, and with unnamed volumes (see the warning in
 
 The page is protected by an **access code** (three groups of four letters and
 digits). The container makes one at its first start, keeps it on the data
-volume, and prints a link that includes it each time it starts:
+volume, and prints a link that includes it each time it starts. These print the
+link, the same on every system:
 
-```bash
-docker exec fishbowl fishbowl-link          # the page
-docker exec fishbowl fishbowl-link admin    # straight to the Server Administration window
-docker exec fishbowl fishbowl-link client   # straight to the Fishbowl Client window
-docker logs fishbowl | grep code=           # the same link, from the log
+```sh
+docker exec fishbowl fishbowl-link
+docker exec fishbowl fishbowl-link admin
+docker exec fishbowl fishbowl-link client
 ```
+
+The first is the page; `admin` goes straight to the Server Administration
+window and `client` to the Fishbowl Client window. The log has the same link:
+`docker logs fishbowl | grep code=` on Linux and macOS,
+`docker logs fishbowl | Select-String code=` in PowerShell.
 
 Opening a link with the code signs that browser in for 30 days (a cookie) and
 removes the code from the address bar. You can also type the code on the
@@ -316,7 +433,8 @@ tuning from its `server/bin/my.cnf`, and Fishbowl's Auto Updates set to *Never*
 
 **Prefer a terminal?** `docker exec -it fishbowl fishbowl-setup` asks the same
 four things (the agreement opens in a pager and only a typed `yes` accepts it),
-then hands the answers to the container the same way the page does.
+then hands the answers to the container the same way the page does. It works the
+same in PowerShell.
 
 **"This container has no named volumes."** A container started without the
 three `-v` options (for example from Docker Desktop's Run button) gets unnamed
@@ -325,6 +443,8 @@ container: a new container won't find them by itself, and removing the
 container together with its volumes deletes your install and database. The page
 warns about this and asks for an extra tick before installing; the log prints
 the commands to start over with named volumes, or to reuse the unnamed ones.
+The log writes them the Linux and macOS way, with `\` line breaks: in
+PowerShell, put each command on one line and leave the `\` out.
 
 ## 7. Your company database: restore a .sql backup or create a new one
 
@@ -343,8 +463,21 @@ Administration or by the Client's Schedule module.
 1. **Upload it** in the **Backups to restore (.sql)** box on the page. It lands
    in the container's **import** folder, and the page shows which Fishbowl
    version made it (read from the file's `databaseversion` table). Larger files
-   simply take longer; copying one in works too:
-   `docker cp ./MyCompany_2026-11-15-15-42.sql fishbowl:/var/lib/fishbowl/import/`
+   simply take longer. Copying one in works too, for example from your
+   Downloads folder:
+
+   **Linux and macOS**
+
+   ```bash
+   docker cp ~/Downloads/MyCompany_2026-11-15-15-42.sql fishbowl:/var/lib/fishbowl/import/
+   ```
+
+   **Windows (PowerShell)**
+
+   ```powershell
+   docker cp "$HOME\Downloads\MyCompany_2026-11-15-15-42.sql" fishbowl:/var/lib/fishbowl/import/
+   ```
+
 2. **Open Server Administration** (button on the page) and go to the
    **Restore** tab.
 3. Click the **magnifier** next to **Restore File**. The file chooser opens in
@@ -439,7 +572,8 @@ screen and shows it in a browser tab.
 **Steps and clipboard** (top right) opens a side panel with the restore and
 create steps, the files in the import folder, and a clipboard box: to paste text
 into a field, put it in the box, click the field in the window, and press
-Ctrl+V. Text copied inside the window shows up in the box.
+Ctrl+V. Text copied inside the window shows up in the box. It's Ctrl+V on a Mac
+too, since the window is a Linux program.
 
 ### Changing settings while Fishbowl Server is running
 
@@ -475,7 +609,7 @@ to Fishbowl**. Of those, only Backup Database was tried here
 | Legacy Port (28192) | Not published. Publish it (`-p 28192:28192`) only if something you use still connects to it. |
 | Inactivity Time | Fishbowl's inactivity timeout, in minutes. |
 | Broadcast Server Location, Users can only be logged in once | Fishbowl's own options. |
-| Server memory | Set to 8192 MB at install. A new value takes effect at the next restart; the log shows `Server memory changed in Server Administration: now …` and the heap in `Fishbowl Server is running (heap …)`. Keep Docker's memory limit above it ([section 2](#2-requirements)). |
+| Server memory | Set to 8192 MB at install. A new value takes effect at the next restart; the log shows `Server memory changed in Server Administration: now …` and the heap in `Fishbowl Server is running (heap …)`. Keep Docker's memory limit above it ([section 2](#how-much-memory-docker-gets)). |
 | Auto Updates | Set to *Never notify or update automatically* at install. Leave it: Fishbowl's download-and-apply options would update Fishbowl inside the container, skipping the license step and backup that new images do. |
 | MySQL Server Location | `/usr/bin`. Leave it: Backup Database and Restore use MySQL's tools from there. |
 | Enable read-only database user, Read-only user password | Fishbowl's read-only MySQL user. Fishbowl requires at least 8 characters with upper- and lower-case letters, a digit and a special character. |
@@ -506,22 +640,46 @@ follows it when you resize the tab.
   Fishbowl's login dialog.
 
 **Fishbowl Clients on other computers** connect to the Docker host's **name or
-IP address, port 2456**. The client that comes with 26.10 defaults to the
-server's web port (`ServerPort=2456`, `UseWebConnection=true` in its
-`client.properties`). Allow TCP 2456 through the host's firewall.
+IP address, port 2456** (or the computer's port you published instead, see
+[a port is already in use](#a-port-is-already-in-use)). The client that comes
+with 26.10 defaults to the server's web port (`ServerPort=2456`,
+`UseWebConnection=true` in its `client.properties`).
+
+The host's firewall has to let TCP 2456 in. None of the following was tried
+here:
+
+- **Windows:** if other computers can't connect, add a rule in PowerShell
+  opened with **Run as administrator**:
+
+  ```powershell
+  New-NetFirewallRule -DisplayName "Fishbowl Server (Docker)" -Direction Inbound -Protocol TCP -LocalPort 2456 -Action Allow
+  ```
+
+- **macOS:** with the firewall on (**System Settings → Network → Firewall**),
+  allow incoming connections for Docker when macOS asks.
+- **Linux:** Docker usually opens published ports through its own firewall
+  rules. If other computers still can't connect, open the port in your
+  firewall, for example with firewalld:
+
+  ```bash
+  sudo firewall-cmd --permanent --add-port=2456/tcp
+  sudo firewall-cmd --reload
+  ```
 
 ## 10. Day-to-day use
+
+These commands are the same on Linux, macOS and Windows.
 
 | Task | How |
 |---|---|
 | Open the page | the link from `docker exec fishbowl fishbowl-link` (your browser remembers the sign-in for 30 days) |
 | Start, stop, restart Fishbowl Server | the buttons on the page (MySQL and the page keep running) |
-| Stop or start the whole container | `docker stop fishbowl` / `docker start fishbowl` (Compose: `docker compose stop` / `up -d`) |
+| Stop or start the whole container | `docker stop fishbowl` / `docker start fishbowl` (Compose, in its folder: `docker compose stop` / `docker compose up -d`) |
 | Status | the page, or `docker ps` (shows *healthy* once Fishbowl Server accepts connections) |
-| Log | `docker logs -f fishbowl` |
+| Log | `docker logs -f fishbowl` (Ctrl+C stops following it) |
 | Fishbowl Server's own log | `docker exec fishbowl tail -n 100 /opt/Fishbowl/logs/fbserver.log` |
 | Back up all of MySQL | `docker exec -it fishbowl fishbowl-backup` |
-| Versions in the image | `docker run --rm fishbowl versions` |
+| Versions in the image | `docker run --rm --platform linux/amd64 fishbowl versions` |
 
 ## 11. Backups and your data
 
@@ -533,14 +691,19 @@ server's web port (`ServerPort=2456`, `UseWebConnection=true` in its
 | `fishbowl-app` | `/opt/Fishbowl` | Fishbowl as installed: program files, settings (`server/bin/eve.properties`, which holds the license key and Fishbowl's encrypted database password), Fishbowl's logs and reports, and Fishbowl's own backups (`data/backups/`). |
 | `fishbowl-data` | `/var/lib/fishbowl` | The container's state (setup and license-agreement records, installed version, the page's access code), the import folder (`import/`), `fishbowl-backup` files (`backups/`), logs, and the installer's temporary files. |
 
+Docker keeps volumes inside its own storage (on macOS and Windows, inside
+Docker Desktop's virtual machine), not in a folder you can open. The commands
+below copy things out to the folder your terminal is in.
+
 ### Fishbowl's own backups
 
 In Server Administration, right-click your database on the **Database** tab →
 **Backup Database**. Fishbowl reports "Successfully ran database backup." and
 writes `/opt/Fishbowl/data/backups/<database>_<YYYY-MM-DD-HH-MM>.sql`. Copy it
-off the server:
+off the server, on any system (the first command lists the files, the second
+copies one, with its name from the list, into the current folder):
 
-```bash
+```sh
 docker exec fishbowl ls -l /opt/Fishbowl/data/backups/
 docker cp fishbowl:/opt/Fishbowl/data/backups/MyCompany_2026-11-15-15-42.sql .
 ```
@@ -551,64 +714,141 @@ same folder; that wasn't tested.
 
 ### Backup of all of MySQL while running
 
-```bash
-docker exec -it fishbowl fishbowl-backup          # asks for the MySQL root password
-docker cp fishbowl:/var/lib/fishbowl/backups/fishbowl-backup-<timestamp>.sql.gz .
+A consistent `mysqldump` of every database (including MySQL's users), gzipped and
+readable by root only, kept in the data volume. It asks for the MySQL root
+password, so run it on its own:
+
+```sh
+docker exec -it fishbowl fishbowl-backup
 ```
 
-A consistent `mysqldump` of every database (including MySQL's users), gzipped and
-readable by root only, kept in the data volume. Restore it with the container
-stopped:
+It ends with the file's name (`Backup written: …`), something like
+`fishbowl-backup-20261117T163000Z.sql.gz` (the time is UTC). To copy it into the
+current folder, on any system, with your file's name:
+
+```sh
+docker cp fishbowl:/var/lib/fishbowl/backups/fishbowl-backup-20261117T163000Z.sql.gz .
+```
+
+To restore one, stop the container, run `restore`, and start the container
+again, one step at a time: `restore` asks you to type `restore` and the MySQL
+root password, and lines pasted after it would land in its questions.
+
+```sh
+docker stop fishbowl
+```
+
+**Linux and macOS**
 
 ```bash
-docker stop fishbowl
-docker run -it --rm -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl \
-  -v fishbowl-data:/var/lib/fishbowl fishbowl restore /var/lib/fishbowl/backups/fishbowl-backup-<timestamp>.sql.gz
+docker run -it --rm --platform linux/amd64 \
+  -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl \
+  fishbowl restore /var/lib/fishbowl/backups/fishbowl-backup-20261117T163000Z.sql.gz
+```
+
+**Windows (PowerShell)**
+
+```powershell
+docker run -it --rm --platform linux/amd64 -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl restore /var/lib/fishbowl/backups/fishbowl-backup-20261117T163000Z.sql.gz
+```
+
+```sh
 docker start fishbowl
 ```
 
-(If the file isn't in the volume already: `docker cp` it into
-`fishbowl:/var/lib/fishbowl/backups/` first; that works on a stopped
-container.) `restore` asks you to type `restore` and the MySQL root password. It
-replaces the databases in the file.
+`restore` replaces the databases in the file. If the file isn't in the volume
+already, `docker cp` it into `fishbowl:/var/lib/fishbowl/backups/` first; that
+works on a stopped container.
 
 ### Whole-installation backup (all three volumes, container stopped)
 
 The way to move the whole server to another machine, and the way back after an
-upgrade you want to undo:
+upgrade you want to undo. It writes `fishbowl-volumes-<date>.tar.gz` into the
+folder your terminal is in:
+
+**Linux and macOS**
 
 ```bash
 docker stop fishbowl
-docker run --rm --entrypoint tar \
+docker run --rm --platform linux/amd64 --entrypoint tar \
   -v fishbowl-mysql:/volumes/mysql:ro -v fishbowl-app:/volumes/app:ro -v fishbowl-data:/volumes/data:ro \
   -v "$PWD":/backup fishbowl \
   -czf /backup/fishbowl-volumes-$(date +%Y%m%d).tar.gz -C /volumes .
 docker start fishbowl
 ```
 
-Restore into empty volumes with the same names (for example on a new machine),
-then start the container normally:
+**Windows (PowerShell)**
+
+```powershell
+docker stop fishbowl
+docker run --rm --platform linux/amd64 --entrypoint tar -v fishbowl-mysql:/volumes/mysql:ro -v fishbowl-app:/volumes/app:ro -v fishbowl-data:/volumes/data:ro -v "${PWD}:/backup" fishbowl -czf "/backup/fishbowl-volumes-$(Get-Date -Format yyyyMMdd).tar.gz" -C /volumes .
+docker start fishbowl
+```
+
+Restore into empty volumes with the same names (for example on a new machine,
+which can run a different system than the old one). Run it in the folder that
+holds the file, with your file's name, then start the container normally:
+
+**Linux and macOS**
 
 ```bash
-docker run --rm --entrypoint tar \
+docker run --rm --platform linux/amd64 --entrypoint tar \
   -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data \
   -v "$PWD":/backup fishbowl \
-  -xzpf /backup/fishbowl-volumes-YYYYMMDD.tar.gz -C /volumes
+  -xzpf /backup/fishbowl-volumes-20261117.tar.gz -C /volumes
+```
+
+**Windows (PowerShell)**
+
+```powershell
+docker run --rm --platform linux/amd64 --entrypoint tar -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data -v "${PWD}:/backup" fishbowl -xzpf /backup/fishbowl-volumes-20261117.tar.gz -C /volumes
 ```
 
 ## 12. Updating to a new Fishbowl version
 
 Each Fishbowl version is a new image, built after the installer on this
 repository's release is replaced ([section 14](#14-maintaining-this-repository)).
+First build it, the same on every system:
 
-```bash
-docker build -t fishbowl https://github.com/cesiumskater/Docker_Testing.git#main
-docker tag fishbowl "fishbowl:$(docker run --rm fishbowl version)"
-docker rm -f fishbowl
-# then the same docker run command as in section 4
+```sh
+docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater/Docker_Testing.git#main"
+docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
 ```
 
-With Compose: `docker compose build && docker compose up -d`.
+If the build finished without errors, replace the container. `docker stop`
+gives Fishbowl Server and MySQL their three minutes to shut down cleanly
+(`docker rm -f` wouldn't). Use the same `-p` and `TZ` values you started it
+with:
+
+**Linux and macOS**
+
+```bash
+docker stop fishbowl
+docker rm fishbowl
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
+  -p 2456:2456 -p 127.0.0.1:6080:6080 \
+  -e TZ=America/Denver \
+  -v fishbowl-mysql:/var/lib/mysql \
+  -v fishbowl-app:/opt/Fishbowl \
+  -v fishbowl-data:/var/lib/fishbowl \
+  fishbowl
+```
+
+**Windows (PowerShell)**
+
+```powershell
+docker stop fishbowl
+docker rm fishbowl
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
+```
+
+With Compose, in the folder with `compose.yaml`, on every system (if the build
+fails, the second command changes nothing):
+
+```sh
+docker compose build
+docker compose up -d
+```
 
 **Nothing is upgraded until you say so.** The new image starts the installed
 version as before, and the page offers **Upgrade to Fishbowl X**: read and
@@ -657,7 +897,8 @@ Downgrades are refused, so it's the way back if the new version doesn't work out
   and everything you type in the windows travel unencrypted, and the page says
   so at the top. To use it from another computer, an SSH tunnel keeps it
   private: `ssh -L 6080:localhost:6080 you@docker-host`, then open
-  `http://localhost:6080/` there.
+  `http://localhost:6080/` there. The `ssh` command comes with Linux, macOS and
+  Windows 10 and 11, and the Docker host has to run an SSH server.
 - Requests that change something must come from the page itself (a header only
   the page sends, and the browser's Origin); a link or form on another website
   can't press its buttons.
@@ -677,12 +918,17 @@ Downgrades are refused, so it's the way back if the new version doesn't work out
 
 The repository lives at **https://github.com/cesiumskater/Docker_Testing**
 (public, default branch `main`). To replace its files with a new copy from a zip,
-in a clone of the repository:
+work in a clone of the repository. These assume the clone is in your home
+folder (`git clone https://github.com/cesiumskater/Docker_Testing.git` there
+makes one, on every system) and the zip is in Downloads:
+
+**Linux and macOS**
 
 ```bash
 cd ~/Docker_Testing
 git pull
-git rm -rq .                                   # remove every tracked file (the .git folder stays)
+git rm -rq .
+rm -rf /tmp/fishbowl-new
 unzip -q ~/Downloads/Docker_Testing.zip -d /tmp/fishbowl-new
 cp -a /tmp/fishbowl-new/Docker_Testing/. .
 git add -A
@@ -690,13 +936,34 @@ git commit -m "Describe the change"
 git push origin main
 ```
 
-(`git rm` first makes sure files that the new copy no longer has are deleted
-too.) Uploading through GitHub's web page also works: **Add file → Upload
-files**, drag in everything *inside* the unzipped folder (show hidden files so
-`.github`, `.dockerignore` and `.gitignore` come along), commit. GitHub's upload
-page takes up to 100 files at a time and 25 MiB per file. It doesn't keep the
-executable bit, which doesn't matter here: the Dockerfile sets permissions
-itself.
+On a Mac, Safari may have unzipped the download already. Then leave out the
+`unzip` line and copy from `~/Downloads/Docker_Testing/.` instead.
+
+**Windows (PowerShell)**
+
+```powershell
+cd "$HOME\Docker_Testing"
+git pull
+git rm -rq .
+Remove-Item -Recurse -Force "$env:TEMP\fishbowl-new" -ErrorAction SilentlyContinue
+Expand-Archive "$HOME\Downloads\Docker_Testing.zip" -DestinationPath "$env:TEMP\fishbowl-new"
+robocopy "$env:TEMP\fishbowl-new\Docker_Testing" . /E /NFL /NDL /NJH /NJS /NP
+git add -A
+git commit -m "Describe the change"
+git push origin main
+```
+
+`git rm` first makes sure files that the new copy no longer has are deleted
+too (the `.git` folder stays). The repository's `.gitattributes` keeps Linux
+line endings in a Windows checkout: the scripts run inside Linux and break with
+Windows line endings if you ever build from a local copy.
+
+Uploading through GitHub's web page also works: **Add file → Upload files**,
+drag in everything *inside* the unzipped folder (show hidden files so
+`.github`, `.dockerignore`, `.gitattributes` and `.gitignore` come along),
+commit. GitHub's upload page takes up to 100 files at a time and 25 MiB per
+file. It doesn't keep the executable bit, which doesn't matter here: the
+Dockerfile sets permissions itself.
 
 ### The installer release (one time, then once per Fishbowl version)
 
@@ -744,10 +1011,18 @@ without repository activity; re-enable it on the Actions tab if that happens.
 `tests/run-checks.sh` builds the image against a local stand-in for GitHub's
 release, then starts throwaway containers the way this README does (detached,
 no terminal), fills in the page's forms, and clicks through Server
-Administration. It prints PASS or FAIL per check:
+Administration. It prints PASS or FAIL per check. The checks run on **Linux
+only** (bash, Python 3 and Docker Engine); they weren't tried on macOS or in
+WSL. They drive Server Administration with vncdotool, installed here in a
+Python virtual environment, since some Linux distributions refuse a
+system-wide `pip install`:
+
+**Linux**
 
 ```bash
-pip install vncdotool          # drives Server Administration over VNC in the checks
+python3 -m venv ~/.venvs/fishbowl-checks
+~/.venvs/fishbowl-checks/bin/pip install vncdotool
+export VNCDO="$HOME/.venvs/fishbowl-checks/bin/vncdo"
 bash tests/run-checks.sh --installer ~/Downloads/Fishbowl-2026.10.sh
 bash tests/run-checks.sh --installer ~/Downloads/Fishbowl-2026.10.sh \
   --reference-sql ~/Backups/MyCompany_2026-08-10-14-37.sql
@@ -781,6 +1056,8 @@ sockets in `/run/fishbowl/`.
 
 ### Commands
 
+The same on Linux, macOS and Windows.
+
 | Command | |
 |---|---|
 | `docker exec fishbowl fishbowl-link` | The page's link with its access code (`admin` or `client` for a window's link; `--new-code` to replace the code). |
@@ -788,16 +1065,16 @@ sockets in `/run/fishbowl/`.
 | `docker exec -it fishbowl fishbowl-upgrade` | An upgrade at a terminal instead of the page. |
 | `docker exec fishbowl fishbowl-admin` | Opens Server Administration and prints its link. |
 | `docker exec -it fishbowl fishbowl-backup` | Back up all of MySQL. |
-| `docker run -it --rm <the three -v> fishbowl restore FILE` | Restore a `fishbowl-backup` file (container stopped). |
-| `docker run … fishbowl admin` | Like the normal start, but Fishbowl Server stays stopped until you press Start on the page. |
-| `docker run --rm fishbowl version` | The image's Fishbowl version, for tagging (`2026.10`). |
-| `docker run --rm fishbowl versions` | Fishbowl, MySQL and Java versions in the image. |
+| `docker run -it --rm --platform linux/amd64 <the three -v> fishbowl restore FILE` | Restore a `fishbowl-backup` file (container stopped). |
+| `docker run --platform linux/amd64 … fishbowl admin` | Like the normal start, but Fishbowl Server stays stopped until you press Start on the page. |
+| `docker run --rm --platform linux/amd64 fishbowl version` | The image's Fishbowl version, for tagging (`2026.10`). |
+| `docker run --rm --platform linux/amd64 fishbowl versions` | Fishbowl, MySQL and Java versions in the image. |
 
 ### Environment variables
 
 | Variable | Default | |
 |---|---|---|
-| `TZ` | `UTC` | Time zone for Fishbowl and MySQL, e.g. `America/Denver`. |
+| `TZ` | `UTC` | Time zone for Fishbowl and MySQL, as a tz database name, e.g. `America/Denver`. |
 | `FISHBOWL_PROMPT_TIMEOUT` | `1800` | Seconds each question of `fishbowl-setup` / `fishbowl-upgrade` waits before giving up. |
 | `FISHBOWL_ALLOW_TRIAL_UPGRADE` | `0` | `1` offers the upgrade to a trial installation. Fishbowl Server refuses to update a trial's database, so this only works when the new version doesn't change the database; the test suite uses it. |
 | `FISHBOWL_ALLOW_NO_VOLUMES` | `0` | `1` skips the check that the three data paths are volumes (throwaway tests only). |
@@ -828,6 +1105,8 @@ using the same volumes. `fishbowl-setup`, `fishbowl-upgrade` and
 | `/opt/fishbowl-installer/` | The bundled installer, its license texts, `installer.env`. |
 | `/usr/local/lib/fishbowl/portal.py`, `/usr/local/share/fishbowl/web/` | The Fishbowl page. |
 
+These are paths inside the container (Linux paths, on every system).
+
 Fishbowl's installer also keeps the license key in plain text in
 `/opt/Fishbowl/installSettings`, `/opt/Fishbowl/.install4j/response.varfile` and
 `/opt/Fishbowl/.install4j/installation.log`. The container makes these
@@ -845,6 +1124,78 @@ owner-only (as it does `eve.properties`); it doesn't delete Fishbowl's own files
 | `FEDORA_IMAGE` | `registry.fedoraproject.org/fedora:44` | Base image. |
 
 ## 16. Troubleshooting
+
+### Commands on Linux, macOS and Windows
+
+| Message | Fix |
+|---|---|
+| PowerShell: `docker: invalid reference format`, then `The term '-p' is not recognized …` | A Linux and macOS command, with its `\` line breaks, went into PowerShell. Use the **Windows (PowerShell)** version: one line, no `\`. Nothing was created, so just run that. |
+| PowerShell: `A parameter cannot be found that matches parameter name 'fsSLO'` | In Windows PowerShell 5.1, `curl` is another name for `Invoke-WebRequest`. Type `curl.exe`, as the Windows commands do. |
+| PowerShell: `The token '&&' is not a valid statement separator in this version.` | Windows PowerShell 5.1 has no `&&` (PowerShell 7 does). Run the commands one after the other. |
+| zsh: `command not found: #` | A comment line was pasted. The commands here have none; `setopt interactivecomments` makes zsh skip them. |
+| zsh: `no matches found: https://github.com/…#main` | The address lost its quotes, and zsh's `extendedglob` option read `#` as part of a pattern. Keep the quotes. |
+| Linux: `permission denied while trying to connect to the Docker daemon socket` | Docker Engine needs root. Put `sudo` in front of every `docker`, including the one inside `$( )`, or add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then sign out and in). Members of that group effectively have root on the computer. |
+| `Cannot connect to the Docker daemon …` (Linux, macOS) or `error during connect … pipe …` (Windows) | Docker isn't running. Start Docker Desktop, or on Linux with Docker Engine `sudo systemctl start docker`. |
+| Windows: `no matching manifest for windows/amd64 …` while building | Docker Desktop is in Windows containers mode. Right-click its icon in the notification area and choose **Switch to Linux containers…**. |
+| Mac with Apple Silicon: `exec format error`, or a warning that the image's platform (linux/amd64) doesn't match the host's (linux/arm64) | The image was built or started without `--platform linux/amd64`. Build it again with the commands here; turning on Rosetta in Docker Desktop's General settings makes the emulation faster. |
+| `Error response from daemon: container … is not running` right after starting it | The container was created but couldn't start: `docker ps -a` lists it as *Created*, and the command that started it (`docker run` or `docker compose up -d`) printed why. Usually a port is already in use (below). |
+
+### A port is already in use
+
+Docker says `port is already allocated`, `address already in use` or
+`Ports are not available`, and on Windows also `Only one usage of each socket
+address …` or `An attempt was made to access a socket in a way forbidden by its
+access permissions`. Something else on the computer already has 2456 or 6080.
+On a computer used for Fishbowl work, that's often a Fishbowl Server installed
+on the computer itself, which listens on 2456 too.
+
+See what's listening on 2456 (use 6080 for the page's port):
+
+**Linux**
+
+```bash
+sudo ss -ltnp 'sport = :2456'
+```
+
+**macOS**
+
+```bash
+sudo lsof -nP -iTCP:2456 -sTCP:LISTEN
+```
+
+**Windows (PowerShell)**
+
+```powershell
+Get-NetTCPConnection -LocalPort 2456 -State Listen | ForEach-Object { Get-Process -Id $_.OwningProcess }
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
+The first Windows command names the program. The second lists the port ranges
+Windows has reserved (Hyper-V and WSL reserve some): a port inside one of them
+shows no program, and Docker still can't have it. Restarting the Windows NAT
+service in PowerShell opened with **Run as administrator** (`net stop winnat`,
+then `net start winnat`) often frees them.
+
+To fix it, stop the other program, or give this container different ports on
+the computer. In `-p` and in `compose.yaml`'s `ports:`, the left number is the
+computer's and the right one stays as it is:
+
+- `-p 2457:2456` (Compose: `"2457:2456"`): Fishbowl Clients connect to port
+  2457 instead. Not tested here; if Clients have trouble, free 2456 instead.
+- `-p 127.0.0.1:6081:6080` (Compose: `"127.0.0.1:6081:6080"`): the page is at
+  http://localhost:6081/, so change 6080 to 6081 in the links `fishbowl-link`
+  prints.
+
+Either way, **recreate** the container rather than starting it again. In testing
+(Docker Engine 29.9.3), a container that had failed this way and was started
+again ran without its published ports, so the page and port 2456 stayed out of
+reach even after the port was free. A container that never started holds no
+data, so recreating it costs nothing:
+
+- With `docker run`: `docker rm fishbowl`, then the `docker run` command again
+  (with the new numbers, if you changed them).
+- With Compose: change the numbers in `compose.yaml` if you're changing them,
+  then `docker compose up -d --force-recreate`.
 
 ### From the install guide's troubleshooting section, in a container
 
@@ -874,7 +1225,7 @@ owner-only (as it does `eve.properties`); it doesn't delete Fishbowl's own files
 | The Restore tab doesn't list the file | It lists `.sql` files only: unzip a zipped backup first. Uploaded or copied files are in the `import` folder; type the full path in File Name if needed: `/var/lib/fishbowl/import/<file>.sql`. |
 | "Another container is already using these volumes" (exit 6) | Stop the other container first; two MySQL servers on one data directory would corrupt it. |
 | "This container has no named volumes" | See [First-time setup](#6-first-time-setup). The log prints the commands to fix it. |
-| The container keeps restarting with exit code 137 under load | Usually out of memory (`docker inspect -f '{{.State.OOMKilled}}' fishbowl` says `true`): give Docker more memory ([section 2](#2-requirements)). |
+| The container keeps restarting with exit code 137 under load | Usually out of memory (`docker inspect -f '{{.State.OOMKilled}}' fishbowl` says `true`, on every system): give Docker more memory ([section 2](#how-much-memory-docker-gets)). |
 | Warning: "Fishbowl … reports version X, but this container last installed Y" | Fishbowl updated itself. Set Auto Updates to *Never* in Server Administration → Server and update through new images. |
 | The log shows `java.net.ConnectException: Connection refused` at each Fishbowl Server start | Fishbowl Server makes an outgoing web request when it starts. In testing the container had no direct internet access, this error appeared every time, and the server worked normally. |
 | `OpenJDK … warning: Options -Xverify:none and -noverify were deprecated` | Comes from the Java options in Fishbowl's own launchers. Fishbowl ran normally with it in testing. |
@@ -937,7 +1288,9 @@ repeats the checks marked *(suite)*.
 | Upgrade on the page (a stand-in newer version): offered, not without acceptance, wrong password caught early, backup, upgrade, data and memory kept; an interrupted upgrade is finished before Fishbowl starts; downgrade refused; a trial isn't offered the upgrade | Verified *(suite)* |
 | `fishbowl-upgrade` at a terminal | Verified once |
 | `fishbowl-backup`, the `restore` command | Verified *(suite)* |
+| The commands in this README for each system: Linux and macOS blocks run in bash and pasted into an interactive zsh 5.9 with its default options; Windows blocks parsed and run in PowerShell 7 (on Linux), each against a stand-in `docker` that records its arguments; `--platform linux/amd64` and `compose.yaml` checked against Docker Engine 29.9.3 | Checked that way. Not run on a Mac, on Windows, or in Windows PowerShell 5.1. |
+| Docker Desktop on Windows 11 | The build from GitHub completed in the maintainer's own run. Starting the container there isn't confirmed yet. |
 | A purchased license: licensed setup, licensed upgrade, Fishbowl updating an older database (such as the 2026.7 backup) at its first start | **Untested** (needs a real license key) |
-| The real GitHub repository: the `docker build` URL, the release download, the web upload, the Actions workflow, ghcr.io | Untested from here |
-| Docker Desktop (Linux, Mac, Windows), Firefox and Safari, more than one person using the windows at once | Untested |
-| `linux/arm64`; rootless Docker; Podman; behavior under production load (memory figures are estimates) | Untested |
+| The real GitHub repository: the `docker build` URL, the release download, the web upload, the Actions workflow, ghcr.io | The build URL and release download worked in the maintainer's runs on Linux and Windows; the rest is untested from here |
+| Docker Desktop on macOS and Linux, Apple Silicon (x86-64 emulation), Windows on ARM, Firefox and Safari, more than one person using the windows at once | Untested |
+| Running natively on `linux/arm64`; rootless Docker; Podman; behavior under production load (memory figures are estimates) | Untested |
