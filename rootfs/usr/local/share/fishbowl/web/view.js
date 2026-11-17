@@ -195,3 +195,21 @@ armable($('force-close'), async () => {
   try { await api('POST', '/api/session/' + name + '/close', {}); } catch (e) { /* shown by the disconnect */ }
 });
 open();
+
+// The MySQL root password for the "Password" step of Server Administration. The
+// Fishbowl window is Java, so the easy way in is the clipboard box above: one
+// click puts the password there, then click the field in the window and press Ctrl+V.
+(async () => {
+  let pw = '';
+  try { pw = (await getStatus()).mysql_root_password || ''; } catch (e) { /* the page shows the rest anyway */ }
+  const text = pw || 'the MySQL root password you chose when this installation was set up';
+  for (const el of document.querySelectorAll('.mysql-pw')) el.textContent = text;
+  if (!pw) return;
+  for (const btn of document.querySelectorAll('.mysql-pw-copy')) {
+    show(btn, true);
+    btn.addEventListener('click', () => {
+      $('clip').value = pw;
+      if (rfb) rfb.clipboardPasteFrom(pw);
+    });
+  }
+})();

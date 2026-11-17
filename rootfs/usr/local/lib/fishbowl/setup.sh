@@ -129,31 +129,9 @@ collect_answers() {
     note ""
   fi
 
-  # 4. MySQL root password -----------------------------------------------------
-  hr
-  note "MySQL root password"
-  note "Fishbowl's database runs in MySQL inside this container. Choose a password for"
-  note "MySQL's root user; you'll type it again when you create or restore the Fishbowl"
-  note "database in Server Administration, and when upgrading. It isn't stored anywhere"
-  note "in plain text."
-  note "Rules (MySQL MEDIUM policy): at least 8 characters, upper- and lower-case"
-  note "letters, a digit, and a special character."
-  local pw1="" pw2="" problems=""
-  while :; do
-    ask_secret pw1 "MySQL root password: " || { print_rerun_hint; exit 3; }
-    problems="$(password_problems "$pw1")"
-    if [ -n "$problems" ]; then
-      note "That password is missing: ${problems//;/, }. Try again."
-      continue
-    fi
-    ask_secret pw2 "Type it again: " || { print_rerun_hint; exit 3; }
-    if [ "$pw1" != "$pw2" ]; then
-      note "The two entries don't match. Try again."
-      continue
-    fi
-    break
-  done
-  SETUP_PW="$pw1"; pw1=""; pw2=""
+  # 4. MySQL root password: none to choose. Every new installation uses the
+  # password in mysql-root-password.txt (see default_root_password).
+  SETUP_PW="$(default_root_password)"
 
   note ""
   hr
@@ -164,7 +142,7 @@ collect_answers() {
     note "  License:       key ending in ...${SETUP_KEY: -4}"
     note "  Company name:  $SETUP_COMPANY"
   fi
-  note "  MySQL root:    password set (not shown)"
+  note "  MySQL root:    the password this image sets (shown on the Fishbowl page)"
   hr
 }
 
@@ -180,7 +158,8 @@ collect_answers() {
 #   eula_sha256=<SHA-256 of the license text that was shown>
 #   license=trial | key            (setup)
 #   key=...  company=...           (setup with a key)
-#   password=<MySQL root password> (setup: the one to set; upgrade: the current one)
+#   password=<MySQL root password> (upgrade only, and only when the installation has one of
+#                                  its own; empty or absent means the image's password)
 write_answers() {  # write_answers FILE setup|upgrade   (from SETUP_* / UPG_PW; terminal commands only)
   local f="$1" kind="$2"
   (
@@ -199,7 +178,6 @@ write_answers() {  # write_answers FILE setup|upgrade   (from SETUP_* / UPG_PW; 
           printf 'key=%s\n' "$SETUP_KEY"
           printf 'company=%s\n' "$SETUP_COMPANY"
         fi
-        printf 'password=%s\n' "$SETUP_PW"
       else
         printf 'password=%s\n' "${UPG_PW:-}"
       fi
@@ -247,13 +225,13 @@ read_answers() {  # read_answers FILE setup|upgrade [keep]
   if [[ "$a_pw" =~ [[:cntrl:]] ]]; then fail 1 "The MySQL root password contains control characters; nothing was changed."; fi
 
   if [ "$kind" = upgrade ]; then
-    [ -n "$a_pw" ] || fail 1 "The MySQL root password is missing; nothing was changed."
-    UPG_PW="$a_pw"; a_pw=""
+    # Empty means "the image's password"; a value is the password an installation
+    # from an earlier version of this image was set up with.
+    if [ -n "$a_pw" ]; then UPG_PW="$a_pw"; else UPG_PW="$(default_root_password)"; fi
+    a_pw=""
     return 0
   fi
 
-  problem="$(password_problems "$a_pw")"
-  [ -z "$problem" ] || fail 1 "The MySQL root password is missing: ${problem//;/, }. Nothing was installed."
   case "$a_license" in
     trial)
       SETUP_TRIAL=1; SETUP_KEY=""; SETUP_COMPANY="" ;;
@@ -266,7 +244,7 @@ read_answers() {  # read_answers FILE setup|upgrade [keep]
       SETUP_TRIAL=0; SETUP_KEY="$a_key"; SETUP_COMPANY="$a_company" ;;
     *) fail 1 "Choose a license key or the trial. Nothing was installed." ;;
   esac
-  SETUP_PW="$a_pw"; a_pw=""; a_key=""
+  SETUP_PW="$(default_root_password)"; a_pw=""; a_key=""
 }
 
 # -------------------------------------------------------------- automation --
@@ -361,7 +339,7 @@ perform_install() {
   SETUP_SECRETS="$(secret_dir)"
   mysql_initialize
   mysql_start
-  log "MySQL is up; setting the root password you chose"
+  log "MySQL is up; setting its root password"
   mysql_set_root_password
   mysql_verify
   log "Securing MySQL (no anonymous users, no remote root, no test database)"
@@ -399,6 +377,7 @@ perform_install() {
   write_state installed-version "$FISHBOWL_VERSION"
   write_state installed-app-version "$FISHBOWL_APP_VERSION"
   write_state install-type "$([ "$SETUP_TRIAL" = 1 ] && echo trial || echo licensed)"
+  write_state mysql-root-password image   # the image's password (no secret in this file)
   write_state setup.complete "$(_ts) Fishbowl $FISHBOWL_VERSION"
   rm -f "$STATE_DIR/setup.in-progress"
   setup_cleanup

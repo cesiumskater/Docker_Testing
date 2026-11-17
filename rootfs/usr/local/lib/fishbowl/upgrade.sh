@@ -6,8 +6,9 @@
 #
 # An upgrade never starts on its own. A newer image keeps running the Fishbowl
 # version that is installed until someone accepts the new version's license
-# agreement and gives the MySQL root password (for the backup), on the Fishbowl
-# page or with `fishbowl-upgrade` at a terminal.
+# agreement, on the Fishbowl page or with `fishbowl-upgrade` at a terminal. Only an
+# installation made by an earlier version of this image, which asked for its own
+# MySQL root password, has to give that password too (for the backup).
 
 UPG_PW=""
 
@@ -43,6 +44,13 @@ backup_databases() {
 
 ask_root_password_until_valid() {  # sets UPG_PW; MySQL must be running
   local _attempt
+  # New installations use the image's own password, so try that before asking.
+  UPG_PW="$(default_root_password)"
+  if mysql_root UPG_PW -N -B -e 'SELECT 1' >/dev/null 2>&1; then
+    return 0
+  fi
+  note "This installation was set up with a MySQL root password of its own (an earlier"
+  note "version of this image asked for one). Type that password."
   for _attempt in 1 2 3; do
     ask_secret UPG_PW "MySQL root password: " || return 2
     if mysql_root UPG_PW -N -B -e 'SELECT 1' >/dev/null 2>&1; then
@@ -75,9 +83,9 @@ trial_upgrade_text() {  # trial_upgrade_text <installed-version>
 
 upgrade_offer_text() {  # upgrade_offer_text <installed-version>
   note "This image carries Fishbowl $FISHBOWL_VERSION; your volumes have $1, which keeps"
-  note "running. Upgrading needs you: accept the license agreement for $FISHBOWL_VERSION and"
-  note "give the MySQL root password (the database is backed up first). Do that on the"
-  note "Fishbowl page, or run:  docker exec -it <container> fishbowl-upgrade"
+  note "running. Upgrading needs you: accept the license agreement for $FISHBOWL_VERSION (the"
+  note "database is backed up first). Do that on the Fishbowl page, or run:"
+  note "  docker exec -it <container> fishbowl-upgrade"
 }
 
 upgrade_interrupted_text() {  # upgrade_interrupted_text <installed-version>

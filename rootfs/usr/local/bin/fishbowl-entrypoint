@@ -333,8 +333,8 @@ await_setup() {
       hr
       note " Fishbowl isn't installed in these volumes yet. First-time setup is waiting"
       note " for you on the Fishbowl page (link above): read and accept Fishbowl's license"
-      note " agreement, enter your license key or start the trial, choose a MySQL root"
-      note " password. Nothing is accepted or installed until you do."
+      note " agreement, then enter your license key or start the trial. Nothing is"
+      note " accepted or installed until you do."
       note " Prefer a terminal?  docker exec -it <container> fishbowl-setup"
       hr
     fi
@@ -419,7 +419,7 @@ cmd_upgrade_check() {  # internal: validate upgrade answers without changing any
   trap 'upgrade_cleanup' EXIT
   read_answers "${1:-}" upgrade keep
   mysql_root UPG_PW -N -B -e 'SELECT 1' >/dev/null 2>&1 ||
-    fail 8 "MySQL rejected that root password, so nothing was upgraded or changed. Use the password chosen at first-time setup."
+    fail 8 "MySQL rejected that root password, so nothing was upgraded or changed. Use the password this installation was set up with."
 }
 
 cmd_upgrade_job() {  # internal: the upgrade itself, from an answers file; MySQL is running
@@ -825,7 +825,7 @@ cmd_restore() {
   [ "$(id -u)" = 0 ] || fail 1 "Run as root."
   [ -n "$file" ] || fail 1 "Usage: restore /var/lib/fishbowl/backups/<backup>.sql.gz"
   [ -f "$file" ] || fail 1 "No such file: $file (copy it into the container's /var/lib/fishbowl/backups first)."
-  is_interactive || fail 3 "restore asks for the MySQL root password, so it needs a terminal (docker compose run --rm fishbowl restore FILE)."
+  is_interactive || fail 3 "restore may need the MySQL root password typed, so it needs a terminal (docker compose run --rm fishbowl restore FILE)."
   [ -z "$(volumes_missing)" ] || fail 2 "restore needs the same three volumes as the container it restores into."
   prepare_dirs
   acquire_lock

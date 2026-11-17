@@ -7,7 +7,7 @@ Linux part lives inside the container, so the computer that runs Docker can be
 page**, where you do everything else in your browser:
 
 - first-time setup: Fishbowl's license agreement, your license key (or the
-  14 Day Trial) and a MySQL root password
+  14 Day Trial)
 - restoring an existing `.sql` backup through Fishbowl Server Administration's
   **Restore** tab, or creating a new company database
 - **Fishbowl Server Administration** and the **Fishbowl Client**, each in its
@@ -411,14 +411,11 @@ form. Nothing is accepted or installed until you submit it.
 2. **Your Fishbowl license.** Your license key and the company name exactly as
    it appears on your license, or **Start the 14 Day Fishbowl Trial** (Fishbowl
    registers a trial under the name "Trial").
-3. **MySQL root password**, twice. At least 8 characters with upper- and
-   lower-case letters, a digit and a special character (MySQL's MEDIUM policy);
-   any special character works, including `!`, quotes and `$`. You'll type it
-   again in Server Administration to create or restore a database, and to
-   upgrade, so store it safely: **it isn't saved anywhere in plain text**, and
-   this image has no way to reset it.
+3. **Nothing else.** There's no MySQL password to choose: the image sets one
+   itself (see [The MySQL root password](#the-mysql-root-password) below). The
+   page shows it in the steps where Server Administration asks for it.
 
-Then **Install Fishbowl**. The container initializes MySQL, sets your password,
+Then **Install Fishbowl**. The container initializes MySQL, sets its root password,
 checks that MySQL is 8.4.x with `lower_case_table_names = 1`, applies the
 guide's security cleanup, runs Fishbowl's installer unattended and checks the
 memory settings. **In testing that took 22 to 26 seconds.** If anything fails,
@@ -488,8 +485,8 @@ Administration or by the Client's Schedule module.
    name** restores the backup next to anything that's already there, which is
    the safe choice. An **existing name** replaces that database: Fishbowl warns
    that all data not in the backup will be lost.
-5. **Password:** clear the pre-filled value and type your MySQL root password.
-   Host `localhost`, Port `3306` and Username `root` stay as they are.
+5. **Password:** clear the pre-filled value and type the MySQL root password
+   (the page shows it in this step). Host `localhost`, Port `3306` and Username `root` stay as they are.
 6. Click **Restore**, confirm with **Yes**, and wait for **"Database has been
    restored."** (a 54 MB backup took 44 seconds in testing). Click **OK**.
 7. Go to the **Database** tab. The restore has already added the database to
@@ -536,8 +533,8 @@ use the `restore` command for those ([section 11](#11-backups-and-your-data)).
    **+** on the right.
 2. **Database:** a name for your company database (letters, numbers and
    underscores). Host `localhost`, Port `3306`, Username `root`.
-3. **Password:** clear the long pre-filled value first, then type your MySQL
-   root password. Click **Connect**.
+3. **Password:** clear the long pre-filled value first, then type the MySQL
+   root password (the page shows it in this step). Click **Connect**.
 4. Fishbowl asks for your **country** and **costing method** (Average,
    Standard, FIFO or LIFO costing). Fishbowl warns that *this setting cannot be
    changed once the wizard is complete.* Click **OK** and wait while Fishbowl
@@ -715,8 +712,9 @@ same folder; that wasn't tested.
 ### Backup of all of MySQL while running
 
 A consistent `mysqldump` of every database (including MySQL's users), gzipped and
-readable by root only, kept in the data volume. It asks for the MySQL root
-password, so run it on its own:
+readable by root only, kept in the data volume. It needs a terminal (`-it`), and
+it asks for the MySQL root password only if your installation has one of its own
+(see [The MySQL root password](#the-mysql-root-password)), so run it on its own:
 
 ```sh
 docker exec -it fishbowl fishbowl-backup
@@ -731,8 +729,9 @@ docker cp fishbowl:/var/lib/fishbowl/backups/fishbowl-backup-20261117T163000Z.sq
 ```
 
 To restore one, stop the container, run `restore`, and start the container
-again, one step at a time: `restore` asks you to type `restore` and the MySQL
-root password, and lines pasted after it would land in its questions.
+again, one step at a time: `restore` asks you to type `restore` (and the MySQL root password, if your
+installation has one of its own), and lines pasted after it would land in its
+questions.
 
 ```sh
 docker stop fishbowl
@@ -852,9 +851,11 @@ docker compose up -d
 
 **Nothing is upgraded until you say so.** The new image starts the installed
 version as before, and the page offers **Upgrade to Fishbowl X**: read and
-accept the new version's license agreement, give the MySQL root password, and
-press **Back up and upgrade**. (At a terminal: `docker exec -it fishbowl
-fishbowl-upgrade`.) A wrong password is caught before anything is stopped.
+accept the new version's license agreement and press **Back up and upgrade**.
+(At a terminal: `docker exec -it fishbowl fishbowl-upgrade`.) Only an
+installation made by an earlier version of this image, which let you choose a
+MySQL password, is asked for that password too. A wrong one is caught before
+anything is stopped.
 
 Then the container stops Fishbowl Server (Fishbowl Clients are disconnected),
 **backs up every database** to
@@ -893,8 +894,8 @@ Downgrades are refused, so it's the way back if the new version doesn't work out
   refused, and after ten in a minute the page stops accepting codes for a minute.
 - **Port 6080 is published on 127.0.0.1 only**, so the page works on the
   computer that runs Docker and nowhere else. It's plain HTTP: if you publish it
-  on the network (`-p 6080:6080`), the access code, your MySQL root password
-  and everything you type in the windows travel unencrypted, and the page says
+  on the network (`-p 6080:6080`), the access code, the MySQL root password the
+  page shows and everything you type in the windows travel unencrypted, and the page says
   so at the top. To use it from another computer, an SSH tunnel keeps it
   private: `ssh -L 6080:localhost:6080 you@docker-host`, then open
   `http://localhost:6080/` there. The `ssh` command comes with Linux, macOS and
@@ -906,11 +907,44 @@ Downgrades are refused, so it's the way back if the new version doesn't work out
   runs anything itself: it hands requests to the container's main process, which
   checks every value again. Fishbowl Server, Server Administration and the
   Client run as `fishbowl`, MySQL as `mysql`. Neither is root.
-- **Your MySQL root password and license key** go from the form to the container
-  through memory (`/dev/shm`, owner-only, deleted as soon as they're read) and
-  never appear in the logs. The checks in `tests/` look for both in the logs and
-  for the password in the container's data and system folders.
+- **Your license key** goes from the form to the container through memory
+  (`/dev/shm`, owner-only, deleted as soon as it's read) and never appears in the
+  logs. The MySQL root password is the image's own (next section), so it can't
+  be a secret from anyone who has the repository; the checks in `tests/` make sure
+  it isn't written to the logs or into the volumes.
 - MySQL listens on 127.0.0.1 inside the container only.
+
+### The MySQL root password
+
+Nobody chooses one: every new installation gets the same MySQL root password,
+which is in `rootfs/usr/local/lib/fishbowl/mysql-root-password.txt`:
+
+```
+HdI^DtY1$3HoUzCYjiric9%B0k!r5=CG
+```
+
+The Fishbowl page shows it in the Server Administration steps, and its clipboard
+box can hold it so you can paste it into the Fishbowl window. To use it yourself:
+`docker exec -it fishbowl mysql -u root -p`.
+
+**Think about who can read this repository.** If it's public, so is the password,
+so treat it as a default, not a secret. In the one installation I looked at, the
+same string appears in Fishbowl's own installer settings (as `mysql8Password`,
+in `/opt/Fishbowl/.install4j/i4jparams.conf`), which suggests it is Fishbowl's
+default and not something new; I haven't confirmed that with Fishbowl. It also
+protects less than it looks like it does, because MySQL listens on 127.0.0.1 inside the container and port 3306
+isn't published, so only someone with a shell in the container (or in
+Docker on the host) can use it. If you publish 3306, or want a password only you
+know, change it: put your own into that file before building (new installations
+use it), or for an existing one run `docker exec -it fishbowl mysql -u root -p`
+and `ALTER USER 'root'@'localhost' IDENTIFIED BY '...';`, and remember that
+Fishbowl keeps its own copy of the database password in `eve.properties`, so
+that second route also needs the new password entered in Server Administration.
+Not verified: that second step. Try it on a copy first.
+
+Installations made by an earlier version of this image kept the password their
+owner chose. The page and the terminal commands notice that (the image's
+password is turned down) and ask for it; nothing changes it for you.
 
 ## 14. Maintaining this repository
 
@@ -1206,7 +1240,7 @@ data, so recreating it costs nothing:
 | Can't reach the MySQL socket as a regular user (9.3) | Use `docker exec -it fishbowl mysql -u root -p`. |
 | "No suitable Java Virtual Machine could be found" (9.4) | Not applicable: the image has only Java 21 and points the installer at it. |
 | Installer window blank or white (9.5) | Not applicable: the installer runs unattended. |
-| Bash error with `!` in the password (9.6) | Not applicable: any character works. |
+| Bash error with `!` in the password (9.6) | Not applicable: the image's password has `!`, `$`, `^`, `%` and `=` in it, and every script handles them. |
 | MySQL 9.x instead of 8.4 (9.7) | Not possible: the image build fails unless MySQL is 8.4.x. |
 
 ### Container-specific
@@ -1269,7 +1303,7 @@ repeats the checks marked *(suite)*.
 | Image build proves MySQL 8.4.x and Java 21 and stops on anything else, and finds the browser-window pieces | Verified *(suite)* |
 | Started detached with no terminal: stays up and waits on the page; also when started with no volumes at all (Docker's unnamed volumes, with the warning) | Verified *(suite)* |
 | The page needs its access code; wrong codes refused; requests not from the page refused; `--new-code` signs browsers out | Verified *(suite)* |
-| Setup form: shows the installer's license text; refuses without acceptance, with a stale text or a weak password; trial install; acceptance recorded with how it was given | Verified *(suite)*, and clicked through in Chromium |
+| Setup form: shows the installer's license text; refuses without acceptance or with a stale text; trial install with no password to choose; acceptance recorded with how it was given | Verified *(suite)*, and clicked through in Chromium |
 | `fishbowl-setup` at a terminal: declining, end of input or "y" installs nothing; a full setup | Verified *(suite: declines)*; full setup verified once |
 | Server Administration in its browser window: create a database, Restore tab with the uploaded file, select a database, the OK dialogs; Fishbowl Server starts by itself | Verified in Chromium through the page, and over VNC *(suite)* |
 | The Fishbowl Client in its browser window: opens connected to Fishbowl Server, fills and follows the tab, force close and reopen | Verified in Chromium; opening it *(suite)*. Working in the Client beyond its first-time wizard wasn't tested. |
@@ -1284,8 +1318,8 @@ repeats the checks marked *(suite)*.
 | Docker restarted (the test machine rebooted three times): the container came back to running by itself with `--restart always` | Observed |
 | Recreating the container on the same volumes: no questions, same data; a second container on the same volumes refused | Verified *(suite)* |
 | After setup: MySQL 8.4.10, `lower_case_table_names = 1`, heap 8192 MB, client 2048 MB, non-root processes, *healthy* | Verified *(suite)* |
-| License key and MySQL password absent from `docker logs`; password not stored in plain text anywhere | Verified *(suite)* |
-| Upgrade on the page (a stand-in newer version): offered, not without acceptance, wrong password caught early, backup, upgrade, data and memory kept; an interrupted upgrade is finished before Fishbowl starts; downgrade refused; a trial isn't offered the upgrade | Verified *(suite)* |
+| License key and the MySQL password absent from `docker logs`; the password not written into the volumes; the page shows it to the signed-in person | Verified *(suite)* |
+| Upgrade on the page (a stand-in newer version): offered, not without acceptance, a wrong password given on the page caught early, backup, upgrade, data and memory kept; an interrupted upgrade is finished before Fishbowl starts; downgrade refused; a trial isn't offered the upgrade | Verified *(suite)* |
 | `fishbowl-upgrade` at a terminal | Verified once |
 | `fishbowl-backup`, the `restore` command | Verified *(suite)* |
 | The commands in this README for each system: Linux and macOS blocks run in bash and pasted into an interactive zsh 5.9 with its default options; Windows blocks parsed and run in PowerShell 7 (on Linux), each against a stand-in `docker` that records its arguments; `--platform linux/amd64` and `compose.yaml` checked against Docker Engine 29.9.3 | Checked that way. Not run on a Mac, on Windows, or in Windows PowerShell 5.1. |

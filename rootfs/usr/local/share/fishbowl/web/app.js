@@ -106,8 +106,19 @@
   }
 
   // ------------------------------------------------------------ rendering
+  // The MySQL root password goes into every <code class="mysql-pw"> in the instructions.
+  function showRootPassword(s) {
+    const text = s.mysql_root_password || 'the MySQL root password you chose when this installation was set up';
+    for (const el of document.querySelectorAll('.mysql-pw')) {
+      if (el.textContent !== text) el.textContent = text;
+      el.classList.toggle('secret-text', !!s.mysql_root_password);
+    }
+    show($('upgrade-pw-card'), s.root_password_kind === 'own');
+  }
+
   function render(s) {
     last = s;
+    showRootPassword(s);
     const state = s.state;
     const def = STATES[state] || ['wait', 'Status: ' + state, ''];
 
@@ -316,17 +327,6 @@
     if (text) el.scrollIntoView({ block: 'nearest' });
   }
 
-  function passwordProblems(p) {
-    // The same rules the container checks again (MySQL's MEDIUM policy).
-    const missing = [];
-    if (p.length < 8) missing.push('at least 8 characters');
-    if (!/\p{Lu}/u.test(p)) missing.push('an upper-case letter');
-    if (!/\p{Ll}/u.test(p)) missing.push('a lower-case letter');
-    if (!/[0-9]/.test(p)) missing.push('a digit');
-    if (!/[^\p{L}\p{N}]/u.test(p)) missing.push('a special character (for example ! # % - _ .)');
-    return missing;
-  }
-
   async function submitSetup(ev) {
     ev.preventDefault();
     formError('setup-error', '');
@@ -337,8 +337,6 @@
       eula_accepted: true,
       eula_sha256: eula.sha256,
       license: license ? license.value : '',
-      password: $('setup-pw').value,
-      password2: $('setup-pw2').value,
     };
     if (body.license === 'key') {
       body.key = $('setup-key').value.replace(/\s+/g, '');
@@ -346,9 +344,6 @@
       if (body.key.length < 5) return formError('setup-error', 'Paste your whole license key, or choose the 14 Day Trial.');
       if (!body.company) return formError('setup-error', 'Enter the company name exactly as it appears on your Fishbowl license.');
     }
-    const missing = passwordProblems(body.password);
-    if (missing.length) return formError('setup-error', 'The MySQL root password is missing: ' + missing.join(', ') + '.');
-    if (body.password !== body.password2) return formError('setup-error', "The two password entries don't match.");
     if (last && last.volumes === 'unnamed' && !$('setup-volumes-ok').checked) {
       return formError('setup-error', 'Tick the box under "Before you install", or start the container again with named volumes.');
     }
@@ -356,7 +351,7 @@
     try {
       await api('POST', '/api/setup', body);
       waiting.setup = Date.now();
-      for (const id of ['setup-key', 'setup-pw', 'setup-pw2']) $(id).value = '';
+      $('setup-key').value = '';
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (e) {
       formError('setup-error', e.message);
@@ -369,8 +364,10 @@
     formError('upgrade-error', '');
     if (!eula) return formError('upgrade-error', "The license agreement hasn't loaded yet. Reload the page.");
     if (!$('upgrade-accept').checked) return formError('upgrade-error', "Tick the box to accept the license agreement for the new version first. Without it nothing is upgraded.");
-    const password = $('upgrade-pw').value;
-    if (!password) return formError('upgrade-error', 'Enter the MySQL root password (the one chosen at first-time setup).');
+    // Only an installation from an earlier version of this image has a password to give.
+    const needsPassword = !!last && last.root_password_kind === 'own';
+    const password = needsPassword ? $('upgrade-pw').value : '';
+    if (needsPassword && !password) return formError('upgrade-error', 'Enter the MySQL root password you chose when this installation was set up.');
     $('upgrade-submit').disabled = true;
     try {
       await api('POST', '/api/upgrade', { eula_accepted: true, eula_sha256: eula.sha256, password });

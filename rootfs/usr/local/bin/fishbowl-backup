@@ -3,7 +3,8 @@
 #
 #   docker exec -it fishbowl fishbowl-backup
 #
-# Asks for the MySQL root password (not echoed) and writes a gzipped mysqldump
+# Writes a gzipped mysqldump (it asks for the MySQL root password, not echoed, only when
+# the installation has one of its own from an earlier version of this image)
 # to /var/lib/fishbowl/backups on the data volume.
 
 # shellcheck source=/dev/null
@@ -14,7 +15,7 @@
 . "$LIB_DIR/upgrade.sh"
 
 [ "$(id -u)" = 0 ] || fail 1 "Run it as root: docker exec -it <container> fishbowl-backup"
-is_interactive || fail 1 "fishbowl-backup asks for the MySQL root password, so it needs a terminal: docker exec -it <container> fishbowl-backup"
+is_interactive || fail 1 "fishbowl-backup may need the MySQL root password typed, so it needs a terminal: docker exec -it <container> fishbowl-backup"
 mysqladmin --protocol=socket --socket="$MYSQL_SOCKET" ping --silent >/dev/null 2>&1 ||
   fail 1 "MySQL isn't running in this container. Start the container normally, then run fishbowl-backup."
 trap 'upgrade_cleanup' EXIT

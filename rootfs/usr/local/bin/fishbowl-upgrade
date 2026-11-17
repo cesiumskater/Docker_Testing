@@ -4,8 +4,9 @@
 #   docker exec -it fishbowl fishbowl-upgrade
 #
 # For when the image carries a newer Fishbowl than the one installed. Shows the
-# new version's license agreement, asks for the MySQL root password (the
-# databases are backed up first), then the container upgrades on its own.
+# new version's license agreement, then the container backs up the databases and
+# upgrades on its own. It asks for a MySQL root password only when the installation
+# was set up by an earlier version of this image, which let you choose one.
 
 # shellcheck source=/dev/null
 . /usr/local/lib/fishbowl/common.sh
@@ -56,11 +57,11 @@ fi
 note "License agreement for $FISHBOWL_VERSION accepted."
 note ""
 hr
-note "MySQL root password (the one chosen at first setup), for the pre-upgrade backup."
+note "Checking MySQL access for the pre-upgrade backup."
 rc=0
 ask_root_password_until_valid || rc=$?
 if [ "$rc" != 0 ]; then
-  note "Without the MySQL root password the backup can't run, so nothing was upgraded."
+  note "Without MySQL access the backup can't run, so nothing was upgraded."
   exit "$([ "$rc" = 2 ] && echo 3 || echo 1)"
 fi
 

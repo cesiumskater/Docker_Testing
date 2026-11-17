@@ -88,15 +88,15 @@ class Page:
         return self.api("GET", "/api/eula")
 
     # ---- the forms
-    def setup(self, password, key=None, company=None, accept=True, password2=None, eula_sha256=None):
+    def setup(self, key=None, company=None, accept=True, eula_sha256=None):
         body = {"eula_accepted": bool(accept), "eula_sha256": eula_sha256 or self.eula()["sha256"],
-                "license": "key" if key else "trial", "password": password,
-                "password2": password if password2 is None else password2}
+                "license": "key" if key else "trial"}
         if key:
             body.update(key=key, company=company or "")
         return self.api("POST", "/api/setup", body)
 
-    def upgrade(self, password, accept=True):
+    def upgrade(self, password="", accept=True):
+        """password: only for an installation from an earlier version of this image, which had its own."""
         return self.api("POST", "/api/upgrade", {"eula_accepted": bool(accept), "eula_sha256": self.eula()["sha256"],
                                                  "password": password})
 

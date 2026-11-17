@@ -3,8 +3,8 @@
 #
 #   docker exec -it fishbowl fishbowl-setup
 #
-# Asks the same four things as the page's setup form (license agreement, license
-# key or trial, company name, MySQL root password) and hands the answers to the
+# Asks the same things as the page's setup form (license agreement, license key
+# or trial, company name) and hands the answers to the
 # container, which installs on its own.
 
 # shellcheck source=/dev/null

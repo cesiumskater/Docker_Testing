@@ -66,8 +66,9 @@ PYTHON="${PYTHON:-python3}"
 WORK="$(mktemp -d /tmp/fbcheck.XXXXXX)"
 PASSES=0 FAILS=0
 RESULTS=()
-# shellcheck disable=SC2016  # literal $ on purpose
-PW='Ch3ck!pass"$x'          # deliberately awkward: ! " $
+# The image sets MySQL's root password itself (nobody chooses one); the checks read
+# it from the same file the image does. It holds ^ $ % ! = on purpose.
+PW="$(cat "$REPO/rootfs/usr/local/lib/fishbowl/mysql-root-password.txt")"
 PORT_BASE=47000
 MOCK_PIDS=()
 

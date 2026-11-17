@@ -97,15 +97,7 @@
 
       <fieldset>
         <legend>3. MySQL root password</legend>
-        <p class="hint">Fishbowl's database runs in MySQL inside this container. Choose a password for MySQL's root user. You'll type it again in Server Administration when you create or restore a database, and when you upgrade. It isn't stored anywhere in plain text, so keep it somewhere safe.</p>
-        <label for="setup-pw">Password</label>
-        <div class="row">
-          <input type="password" id="setup-pw" autocomplete="new-password">
-          <button type="button" class="reveal" data-for="setup-pw">Show</button>
-        </div>
-        <p class="hint" id="setup-pw-rules">At least 8 characters, with upper- and lower-case letters, a digit and a special character.</p>
-        <label for="setup-pw2">Type it again</label>
-        <input type="password" id="setup-pw2" autocomplete="new-password">
+        <p class="hint">Nothing to choose. This image sets MySQL's root password itself. The steps for Server Administration below show it, because you type it there when you create or restore a database.</p>
       </fieldset>
 
       <fieldset id="setup-volumes" hidden>
@@ -132,7 +124,7 @@
           <li><a href="/admin" target="_blank" rel="noopener">Open Server Administration</a> and go to the <strong>Restore</strong> tab.</li>
           <li>Click the magnifier next to <strong>Restore File</strong>, double-click the <strong>import</strong> folder, pick your file and click <strong>Open</strong>.</li>
           <li><strong>Database:</strong> Fishbowl fills in a name from the file name. Check it, or type the name you want (letters, numbers and underscores).</li>
-          <li><strong>Password:</strong> clear the pre-filled value and type your MySQL root password. Host <code>localhost</code>, Port <code>3306</code> and Username <code>root</code> stay as they are.</li>
+          <li><strong>Password:</strong> clear the pre-filled value and type the MySQL root password: <code class="mysql-pw"></code>. Host <code>localhost</code>, Port <code>3306</code> and Username <code>root</code> stay as they are.</li>
           <li>Click <strong>Restore</strong>, confirm with <strong>Yes</strong>, and wait for "Database has been restored." A large database takes a while. Click <strong>OK</strong>.</li>
           <li>Go to the <strong>Database</strong> tab. The restored database is in the list. Click it, then <strong>OK</strong>, and <strong>OK</strong> again on "Database Connection has been changed".</li>
         </ol>
@@ -142,7 +134,7 @@
         <ol>
           <li><a href="/admin" target="_blank" rel="noopener">Open Server Administration</a>. On the <strong>Database</strong> tab, click the green <strong>+</strong> on the right.</li>
           <li><strong>Database:</strong> a name for your company database (letters, numbers and underscores). Host <code>localhost</code>, Port <code>3306</code>, Username <code>root</code>.</li>
-          <li><strong>Password:</strong> clear the long pre-filled value, then type your MySQL root password. Click <strong>Connect</strong>.</li>
+          <li><strong>Password:</strong> clear the long pre-filled value, then type the MySQL root password: <code class="mysql-pw"></code>. Click <strong>Connect</strong>.</li>
           <li>Fishbowl asks for your <strong>country</strong> and <strong>costing method</strong>. Fishbowl warns that this can't be changed later. Click <strong>OK</strong> and wait while Fishbowl creates the database.</li>
           <li>Click <strong>OK</strong> to save, then <strong>OK</strong> on "Database Connection has been changed".</li>
         </ol>
@@ -170,7 +162,7 @@
       <ol>
         <li><a href="/admin" target="_blank" rel="noopener">Open Server Administration</a>, <strong>Restore</strong> tab. Click the magnifier next to <strong>Restore File</strong>, double-click the <strong>import</strong> folder, pick the file, <strong>Open</strong>.</li>
         <li><strong>Database:</strong> check the name Fishbowl filled in. A <strong>new name</strong> restores the backup next to your current database, which is the safe choice. An <strong>existing name</strong> replaces that database: everything in it that isn't in the backup is lost.</li>
-        <li><strong>Password:</strong> clear the field, type your MySQL root password. Click <strong>Restore</strong>, confirm with <strong>Yes</strong>, wait for "Database has been restored."</li>
+        <li><strong>Password:</strong> clear the field, type the MySQL root password: <code class="mysql-pw"></code>. Click <strong>Restore</strong>, confirm with <strong>Yes</strong>, wait for "Database has been restored."</li>
         <li>To switch Fishbowl to the restored database: <strong>Database</strong> tab, click it in the list (the restore put it there), <strong>OK</strong>, and OK on the message that follows. Then press <strong>Restart Fishbowl Server</strong> on this page.</li>
       </ol>
       <p class="hint">Replacing the database Fishbowl Server is using right now? Press <strong>Stop Fishbowl Server</strong> first, restore over it, click Cancel to close Server Administration, then press <strong>Start Fishbowl Server</strong>.</p>
@@ -193,9 +185,9 @@
         <div class="eula" id="upgrade-eula" tabindex="0">Loading the license agreement…</div>
         <label class="check"><input type="checkbox" id="upgrade-accept"> <span id="upgrade-accept-label">I have read and accept Fishbowl's license agreement for the new version.</span></label>
       </fieldset>
-      <fieldset>
+      <fieldset id="upgrade-pw-card" hidden>
         <legend>2. MySQL root password</legend>
-        <p class="hint">The one you chose at first-time setup. It's used to back up every database before anything is changed.</p>
+        <p class="hint">This installation was set up by an earlier version of this image, which asked you to choose a MySQL root password. Type that one. It's used to back up every database before anything is changed.</p>
         <div class="row">
           <input type="password" id="upgrade-pw" autocomplete="off" aria-label="MySQL root password">
           <button type="button" class="reveal" data-for="upgrade-pw">Show</button>

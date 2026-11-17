@@ -240,14 +240,13 @@ def runtime(a):
 
     def refused(status, **kw):
         try:
-            page.setup(**({"password": pw} | kw))
+            page.setup(**kw)
         except PageError as e:
             expect(e.status == status, f"got {e.status}: {e.message}")
             return
         raise AssertionError("the setup form was accepted")
     check("setup form: license agreement not accepted -> refused", lambda: refused(400, accept=False))
     check("setup form: accepting a different text than the image's -> refused", lambda: refused(409, eula_sha256="0" * 64))
-    check("setup form: weak MySQL password -> refused", lambda: refused(400, password="weak"))
     check("fishbowl-setup: end of input is not acceptance (exit 3)", lambda: expect(fishbowl_setup_answer(box, None) == 3))
     check("fishbowl-setup: 'no' declines (exit 1)", lambda: expect(fishbowl_setup_answer(box, "no") == 1))
     check("fishbowl-setup: 'y' is not 'yes' (exit 1)", lambda: expect(fishbowl_setup_answer(box, "y") == 1))
@@ -260,10 +259,10 @@ def runtime(a):
     t0 = time.time()
 
     def setup_on_page():
-        page.setup(pw)
+        page.setup()
         st = page.wait_state("awaiting-database", 900)
         expect(st["install_type"] == "trial" and st["installed_version"] == st["image_version"])
-    ok = check("setup on the page: license agreement, trial, MySQL password -> installed, waiting for a database", setup_on_page)
+    ok = check("setup on the page: license agreement and trial, no password to choose -> installed, waiting for a database", setup_on_page)
     print(f"      (install took {time.time() - t0:.0f}s)", flush=True)
     if not ok:
         return
@@ -311,10 +310,15 @@ def runtime(a):
     check("Docker reports the container healthy", healthy)
 
     key = box.exec("python3", "-I", "/usr/local/lib/fishbowl/props.py", "get", "/opt/Fishbowl/server/bin/eve.properties", "licenseKey").stdout.strip()
+    check("the page shows the image's MySQL password to the signed-in person, and MySQL accepts it", lambda: expect(
+        page.status().get("root_password_kind") == "image" and page.status().get("mysql_root_password") == pw
+        and box.sql("SELECT 1") == "1"))
     check("MySQL password not in docker logs", lambda: expect(pw not in box.logs()))
     check("license key not in docker logs", lambda: expect(not key or key not in box.logs()))
-    check("MySQL password not stored in plain text anywhere", lambda: expect(
-        box.exec("grep", "-rlaF", "--", pw, "/var/lib/fishbowl", "/opt/Fishbowl", "/etc", "/root", "/tmp", "/run", "/dev/shm").stdout.strip() == ""))
+    # Fishbowl's own installer lists this same password (variable mysql8Password in
+    # /opt/Fishbowl/.install4j/i4jparams.conf), so that folder is left out.
+    check("MySQL password not written into the volumes, /etc, /root or /tmp by this image", lambda: expect(
+        box.exec("grep", "-rlaF", "--exclude-dir=.install4j", "--", pw, "/var/lib/fishbowl", "/opt/Fishbowl", "/etc", "/root", "/tmp", "/run", "/dev/shm").stdout.strip() == ""))
     check("a second container on the same volumes is refused", lambda: expect(
         sh("timeout", "60", "docker", "run", "--rm", *box.volume_args, box.image).returncode == 6))
 
@@ -446,8 +450,6 @@ def runtime(a):
     # -- backup of everything, and the restore command
     def backup():
         s = Session(["docker", "exec", "-it", box.name, "fishbowl-backup"], os.devnull)
-        s.expect(r"MySQL root password: ", 30)
-        s.sendline(pw)
         path = s.expect(r"Backup written: (\S+)", 600).group(1).decode()
         s.wait_exit(30)
         expect(path.startswith("/var/lib/fishbowl/backups/"))
@@ -465,8 +467,6 @@ def runtime(a):
         s = Session(["docker", "run", "-it", "--rm", *box.volume_args, box.image, "restore", backup_path], os.devnull)
         s.expect(r'Type "restore" to continue: ', 60)
         s.sendline("restore")
-        s.expect(r"MySQL root password: ", 120)
-        s.sendline(pw)
         s.expect(r"Restore finished", 900)
         expect(s.wait_exit(180) == 0)
         box.run()
@@ -483,6 +483,37 @@ def runtime(a):
         box._page = None
         expect(box.page().status()["state"] == "running")
     check("fishbowl-link --new-code signs every browser out", new_code)
+
+    # -- an installation from an earlier version of this image, which let its owner choose a password
+    def earlier_installation():
+        own = "Own!pass123x"
+        box.sql(f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{own}'")
+        box.password = own
+        box.remove()
+        box.helper("rm -f /var/lib/fishbowl/state/mysql-root-password")
+        box.run()
+        deadline = time.time() + 300
+        st = {}
+        while time.time() < deadline:
+            try:
+                st = box.page().status()
+                if st.get("root_password_kind"):
+                    break
+            except Exception:
+                pass
+            time.sleep(3)
+        expect(st.get("root_password_kind") == "own" and st.get("mysql_root_password") == "", str(st))
+        s = Session(["docker", "exec", "-it", box.name, "fishbowl-backup"], os.devnull)
+        s.expect(r"MySQL root password: ", 120)
+        s.sendline(own)
+        s.expect(r"Backup written: (\S+)", 600)
+        s.wait_exit(30)
+        # Put it back: the upgrade checks carry on from these volumes.
+        box.sql(f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{pw}'")
+        box.password = pw
+        expect(box.exec("sh", "-c", "echo image > /var/lib/fishbowl/state/mysql-root-password").returncode == 0)
+        expect(box.sql("SELECT 1") == "1")
+    check("an earlier installation's own MySQL password: the page says so, and fishbowl-backup asks for it", earlier_installation)
 
     box.remove()
 
@@ -546,7 +577,7 @@ def reference(a):
         nonlocal page
         box.wait_state("needs-setup", 90)
         page = box.page()
-        page.setup(pw)
+        page.setup()
         page.wait_state("awaiting-database", 900)
     if not check("reference: fresh trial installation, waiting for a database", install):
         box.remove()
@@ -668,7 +699,7 @@ def quick_install(box):
     box.run()
     box.wait_state("needs-setup", 90)
     page = box.page()
-    page.setup(box.password)
+    page.setup()
     page.wait_state("awaiting-database", 900)
     page.open_window("admin")
     start_bridge(box.name)
@@ -724,7 +755,7 @@ def upgrade(a):
 
     def not_accepted():
         try:
-            page.upgrade(pw, accept=False)
+            page.upgrade(accept=False)
         except PageError as e:
             expect(e.status == 400, f"{e.status}: {e.message}")
         else:
@@ -755,14 +786,14 @@ def upgrade(a):
     check("upgrade: wrong MySQL password -> refused before anything is stopped", wrong_password)
 
     def upgrade_on_page():
-        page.upgrade(pw)
+        page.upgrade()
         deadline = time.time() + 60
         while time.time() < deadline and page.status()["state"] != "upgrading":
             time.sleep(1)
         st = page.wait_state("running", 1800)
         expect(st["installed_version"] == new and not st["upgrade_to"], str(st))
         expect(box.installed_version() == new)
-    ok = check("upgrade on the page: license agreement and MySQL password -> backup, upgrade, server running", upgrade_on_page)
+    ok = check("upgrade on the page: license agreement only -> backup, upgrade, server running", upgrade_on_page)
     if ok:
         check("the new version's acceptance is on record", lambda: expect(
             "Fishbowl page" in box.exec("cat", f"/var/lib/fishbowl/state/eula/accepted-{new}").stdout))
@@ -785,7 +816,7 @@ def upgrade(a):
         time.sleep(5)
         expect(not box.client_port_open(), "Fishbowl Server was started on a half-upgraded installation")
         p = box.page()
-        p.upgrade(pw)
+        p.upgrade()
         st = p.wait_state("running", 1800)
         expect(st["installed_version"] == new and box.installed_version() == new)
         expect(box.exec("test", "-e", "/var/lib/fishbowl/state/upgrade.in-progress").returncode != 0)

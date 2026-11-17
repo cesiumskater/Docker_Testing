@@ -2,9 +2,11 @@
 # shellcheck disable=SC2034  # constants and state used by the scripts that source this file
 # Shared helpers for the Fishbowl container scripts. Sourced, never executed.
 #
-# Secrets rule for every script in this image: the License Key and the MySQL
-# root password are read without echo, never passed on a command line, never
-# exported, never logged. Temporary files that hold them live in /dev/shm
+# Secrets rule for every script in this image: the License Key and any MySQL
+# root password someone types are read without echo, never passed on a command
+# line, never exported, never logged. (The image's own MySQL root password is
+# public by design: it sits in mysql-root-password.txt, and the Fishbowl page
+# shows it to the person who is signed in.) Temporary files that hold them live in /dev/shm
 # (RAM), mode 0600, and are deleted as soon as they have been read.
 
 set -o errexit -o nounset -o pipefail
@@ -122,6 +124,19 @@ ask_secret() {
   printf -v "$__var" '%s' "$__v"
 }
 
+# The MySQL root password every new installation gets, so nobody has to choose
+# one. It lives in one file that the shell scripts and the Fishbowl page both read.
+# Installations made by earlier versions of this image may have a password of
+# their own; ask_root_password_until_valid (upgrade.sh) tries this one first and
+# asks only when MySQL turns it down.
+default_root_password() {
+  local f="$LIB_DIR/mysql-root-password.txt" pw=""
+  [ -r "$f" ] || fail 1 "The MySQL root password file $f is missing from this image."
+  IFS= read -r pw < "$f" || [ -n "$pw" ] || true
+  [ -n "$pw" ] || fail 1 "The MySQL root password file $f is empty."
+  printf '%s' "$pw"
+}
+
 # --------------------------------------------------------- run commands -----
 as_user() {  # as_user <user> <cmd...>   (keeps the environment we pass explicitly)
   local user="$1"; shift
@@ -178,11 +193,13 @@ INFO_UPGRADE_TO=""        # a newer Fishbowl in this image, waiting for the lice
 INFO_UPGRADE_BLOCKED=""   # "trial": Fishbowl won't update a trial's database
 INFO_VOLUMES=named        # "unnamed": Docker's anonymous volumes (container started without -v)
 publish_info() {
-  local tmp="$INFO_FILE.tmp" kind="" db=""
+  local tmp="$INFO_FILE.tmp" kind="" db="" rootpw=""
   mkdir -p "$RUN_DIR"
   if setup_complete; then
     if installed_is_trial; then kind=trial; else kind=licensed; fi
     db="$(eve_get dbName || true)"
+    # Set up by this image's own password, or by an earlier version that asked for one?
+    if [ -f "$STATE_DIR/mysql-root-password" ]; then rootpw=image; else rootpw=own; fi
   fi
   {
     printf 'image_version=%s\n' "$FISHBOWL_VERSION"
@@ -194,6 +211,7 @@ publish_info() {
     printf 'upgrade_to=%s\n' "$INFO_UPGRADE_TO"
     printf 'upgrade_blocked=%s\n' "$INFO_UPGRADE_BLOCKED"
     printf 'volumes=%s\n' "$INFO_VOLUMES"
+    printf 'root_password=%s\n' "$rootpw"
   } > "$tmp"
   chmod 0644 "$tmp"
   mv -f "$tmp" "$INFO_FILE"

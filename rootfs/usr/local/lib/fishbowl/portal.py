@@ -6,7 +6,7 @@ things:
 
   * shows what state the container is in and what it needs from you
   * takes first-time setup and upgrade answers (license agreement, license key
-    or trial, MySQL root password) and hands them to the entrypoint
+    or trial) and hands them to the entrypoint
   * takes .sql backups into the import folder, for the Restore tab of Fishbowl
     Server Administration
   * shows Server Administration and the Fishbowl Client in browser tabs (noVNC)
@@ -106,6 +106,18 @@ def installer_info():
 
 
 INSTALLER = installer_info()
+
+
+def root_password():
+    """The MySQL root password this image sets (one file, also read by the shell scripts)."""
+    try:
+        with open("/usr/local/lib/fishbowl/mysql-root-password.txt", encoding="utf-8") as f:
+            return f.readline().rstrip("\n")
+    except OSError:
+        return ""
+
+
+ROOT_PASSWORD = root_password()
 EULA_PATH = INSTALLER.get("FISHBOWL_EULA", "")
 
 
@@ -267,6 +279,11 @@ def build_status():
         "upgrade_to": info.get("upgrade_to", ""),
         "upgrade_blocked": info.get("upgrade_blocked", ""),
         "volumes": info.get("volumes", "named"),
+        # "image": MySQL's root password is the one this image sets, shown to the signed-in
+        # page so it can be typed into Server Administration. "own": the installation was
+        # set up by an earlier version of this image with a password the person chose.
+        "root_password_kind": info.get("root_password", ""),
+        "mysql_root_password": ROOT_PASSWORD if info.get("root_password") == "image" else "",
         # answers handed over that the container has not picked up yet
         "requests": {name: os.path.exists(os.path.join(SPOOL, name)) for name in ("setup", "upgrade")},
         "pending_settings": os.path.exists(RUN + "/pending-settings"),
@@ -290,24 +307,6 @@ def spool_write(name, lines=()):
 
 def has_control(text):
     return any(ord(c) < 32 or ord(c) == 127 for c in text)
-
-
-def password_problems(p):
-    """MySQL 8.4 MEDIUM policy, the same rules as setup.sh."""
-    missing = []
-    if len(p) < 8:
-        missing.append("at least 8 characters")
-    if not any(c.isupper() for c in p):
-        missing.append("an upper-case letter")
-    if not any(c.islower() for c in p):
-        missing.append("a lower-case letter")
-    if not any(c in "0123456789" for c in p):
-        missing.append("a digit")
-    if not any(not c.isalnum() for c in p):
-        missing.append("a special character (for example ! # % - _ .)")
-    if has_control(p):
-        missing.append("no control characters")
-    return missing
 
 
 class Problem(Exception):
@@ -343,24 +342,16 @@ def setup_request(data):
         lines += ["license=key", "key=" + key, "company=" + company]
     else:
         raise Problem(400, "Choose a license key or the 14 Day Trial.")
-    password = data.get("password")
-    if not isinstance(password, str):
-        raise Problem(400, "Choose a MySQL root password.")
-    missing = password_problems(password)
-    if missing:
-        raise Problem(400, "The MySQL root password is missing: " + ", ".join(missing) + ".")
-    if password != data.get("password2"):
-        raise Problem(400, "The two password entries don't match.")
-    lines.append("password=" + password)
     return lines
 
 
 def upgrade_request(data):
     digest = check_eula(data)
-    password = data.get("password")
-    if not isinstance(password, str) or not password:
-        raise Problem(400, "Enter the MySQL root password (the one chosen at first-time setup).")
-    if has_control(password):
+    # Only an installation made by an earlier version of this image has a password of
+    # its own to give; everything else uses the image's password, and the container
+    # fills that in when this one is empty.
+    password = data.get("password", "")
+    if not isinstance(password, str) or has_control(password):
         raise Problem(400, "That password contains characters that can't be used.")
     return ["fishbowl-answers 1", "kind=upgrade", "via=page", "eula=accepted", "eula_sha256=" + digest,
             "password=" + password]
