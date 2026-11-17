@@ -56,7 +56,7 @@ while [ $# -gt 0 ]; do
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
-case "$ONLY" in all|build|runtime|upgrade|reference) ;; *) echo "--only takes build, runtime, upgrade or reference" >&2; exit 2 ;; esac
+case "$ONLY" in all|build|runtime|update|upgrade|reference) ;; *) echo "--only takes build, runtime, update, upgrade or reference" >&2; exit 2 ;; esac
 if [ -n "$REFERENCE_SQL" ] && [ ! -f "$REFERENCE_SQL" ]; then echo "--reference-sql: no such file: $REFERENCE_SQL" >&2; exit 2; fi
 if [ "$ONLY" = reference ] && [ -z "$REFERENCE_SQL" ]; then echo "--only reference needs --reference-sql FILE" >&2; exit 2; fi
 export VNCDO="${VNCDO:-$(command -v vncdo || true)}"
@@ -144,8 +144,18 @@ if want build || [ -z "$IMAGE" ]; then
     check "build gate stops on Java other than 21" grep -q "BUILD STOPPED: java on PATH must be 21" <<<"$out"
     check "image reports its Fishbowl version for tagging" \
       test "$(docker run --rm "fbcheck/fishbowl:$VER" version 2>/dev/null)" = "$VER"
-    check "image publishes ports 2456 and 6080 and declares its three volumes" bash -c \
-      "docker inspect -f '{{json .Config.ExposedPorts}} {{json .Config.Volumes}}' 'fbcheck/fishbowl:$VER' | grep -q '2456/tcp.*6080/tcp.*/opt/Fishbowl.*/var/lib/fishbowl.*/var/lib/mysql'"
+    check "image publishes ports 2456, 28192 and 6080 and declares its three volumes" bash -c \
+      "docker inspect -f '{{json .Config.ExposedPorts}} {{json .Config.Volumes}}' 'fbcheck/fishbowl:$VER' | grep -q '2456/tcp.*28192/tcp.*6080/tcp.*/opt/Fishbowl.*/var/lib/fishbowl.*/var/lib/mysql'"
+    # No database ships in the image: the folders that become the volumes hold no
+    # files (Docker would copy them into a new volume), and the only .sql files
+    # anywhere are the ones Fedora's own packages installed (rpm owns those).
+    # shellcheck disable=SC2016  # expands inside the container
+    check "image ships no database: its volume folders hold no files, and no .sql backup is in it" \
+      docker run --rm --entrypoint bash "fbcheck/fishbowl:$VER" -c '
+        f="$(find /var/lib/mysql /opt/Fishbowl /var/lib/fishbowl -mindepth 1 ! -type d 2>/dev/null | head -1)"
+        [ -z "$f" ] || { echo "file in a volume folder: $f"; exit 1; }
+        find / -xdev \( -path /proc -o -path /sys \) -prune -o -type f \( -iname "*.sql" -o -iname "*.sql.gz" \) -print 2>/dev/null |
+          while IFS= read -r f; do rpm -qf "$f" >/dev/null 2>&1 || { echo "not from a package: $f"; exit 1; }; done'
   else
     fail "build: one installer on the release -> image builds (log: $WORK)"
   fi

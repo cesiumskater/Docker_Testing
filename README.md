@@ -45,7 +45,7 @@ and prints the link to the Fishbowl page.
 docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater/Docker_Testing.git#main"
 docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
 docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
-  -p 2456:2456 -p 127.0.0.1:6080:6080 \
+  -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \
   -e TZ=America/Denver \
   -v fishbowl-mysql:/var/lib/mysql \
   -v fishbowl-app:/opt/Fishbowl \
@@ -59,7 +59,7 @@ docker exec fishbowl fishbowl-link
 ```powershell
 docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater/Docker_Testing.git#main"
 docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
-docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
 docker exec fishbowl fishbowl-link
 ```
 
@@ -290,7 +290,7 @@ docker tag ghcr.io/cesiumskater/docker_testing:latest fishbowl
 
 ```bash
 docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
-  -p 2456:2456 -p 127.0.0.1:6080:6080 \
+  -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \
   -e TZ=America/Denver \
   -v fishbowl-mysql:/var/lib/mysql \
   -v fishbowl-app:/opt/Fishbowl \
@@ -301,7 +301,7 @@ docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-tim
 **Windows (PowerShell)**
 
 ```powershell
-docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
 ```
 
 or `docker compose up -d` in the folder with `compose.yaml` (edit `TZ` in it
@@ -314,6 +314,7 @@ first).
 | `--restart always` | Starts the container again whenever Docker starts, and whenever it stops for a reason other than `docker stop`. |
 | `--stop-timeout 180` | Gives Fishbowl Server and MySQL up to 3 minutes to shut down cleanly. |
 | `-p 2456:2456` | Fishbowl Clients connect here. |
+| `-p 28192:28192` | Fishbowl's API ("Legacy Port"): integrated apps and integrations on other computers connect here. |
 | `-p 127.0.0.1:6080:6080` | The Fishbowl page, reachable from this computer only. See [Security](#13-security) before changing it. |
 | `-e TZ=…` | Your time zone, as a tz database name (Fishbowl and MySQL use it for dates). Defaults to UTC. |
 | the three `-v` | Your installation and data. They outlive the container: remove and recreate it any time. |
@@ -450,6 +451,31 @@ says **No company database is selected yet** and asks whether you have a
 Fishbowl backup (a `.sql` file) to restore. Both ways happen in **Fishbowl
 Server Administration**, which opens in its own browser tab; Fishbowl Server
 starts by itself as soon as a database is selected.
+
+**The image ships with no database**, not even a sample one. A new container's
+MySQL holds only MySQL's own system databases until you restore or create one
+here. Whatever you restore or create lives in the `fishbowl-mysql` volume, so it
+stays when the container is recreated (`docker compose up -d --force-recreate`,
+or `docker rm -f` and `docker run` again). To start over with no database at
+all, remove the volumes as well. That also removes the Fishbowl installation, so
+setup runs again (license agreement and license). Take a backup first if you
+want to keep anything ([section 11](#11-backups-and-your-data)). With Docker
+Compose:
+
+```
+docker compose down -v
+docker compose up -d
+```
+
+If you started it with `docker run`, remove the container and its three volumes,
+then start it again with the same `docker run` command:
+
+```
+docker rm -f fishbowl
+docker volume rm fishbowl-mysql fishbowl-app fishbowl-data
+```
+
+These are the same in bash, zsh and PowerShell.
 
 ### Restore a .sql backup
 
@@ -645,14 +671,16 @@ IP address, port 2456** (or the computer's port you published instead, see
 with 26.10 defaults to the server's web port (`ServerPort=2456`,
 `UseWebConnection=true` in its `client.properties`).
 
-The host's firewall has to let TCP 2456 in. None of the following was tried
-here:
+The host's firewall has to let TCP 2456 in, and 28192 for integrated apps and
+integrations on other computers. What Fishbowl itself needs to reach on the
+internet is in [Network and firewall](#network-and-firewall-licenses-plugins-integrations).
+None of the following was tried here:
 
 - **Windows:** if other computers can't connect, add a rule in PowerShell
   opened with **Run as administrator**:
 
   ```powershell
-  New-NetFirewallRule -DisplayName "Fishbowl Server (Docker)" -Direction Inbound -Protocol TCP -LocalPort 2456 -Action Allow
+  New-NetFirewallRule -DisplayName "Fishbowl Server (Docker)" -Direction Inbound -Protocol TCP -LocalPort 2456,28192 -Action Allow
   ```
 
 - **macOS:** with the firewall on (**System Settings → Network → Firewall**),
@@ -662,7 +690,7 @@ here:
   firewall, for example with firewalld:
 
   ```bash
-  sudo firewall-cmd --permanent --add-port=2456/tcp
+  sudo firewall-cmd --permanent --add-port=2456/tcp --add-port=28192/tcp
   sudo firewall-cmd --reload
   ```
 
@@ -796,8 +824,9 @@ works on a stopped container.
 ### Whole-installation backup (all three volumes, container stopped)
 
 The way to move the whole server to another machine, and the way back after an
-upgrade you want to undo. It writes `fishbowl-volumes-<date>.tar.gz` into the
-folder your terminal is in:
+upgrade you want to undo. It writes `fishbowl-volumes-<date>-<time>.tar.gz` into
+the folder your terminal is in (the time in the name means a second backup never
+overwrites the first):
 
 **Linux and macOS**
 
@@ -806,7 +835,7 @@ docker stop fishbowl
 docker run --rm --platform linux/amd64 --entrypoint tar \
   -v fishbowl-mysql:/volumes/mysql:ro -v fishbowl-app:/volumes/app:ro -v fishbowl-data:/volumes/data:ro \
   -v "$PWD":/backup fishbowl \
-  -czf /backup/fishbowl-volumes-$(date +%Y%m%d).tar.gz -C /volumes .
+  -czf "/backup/fishbowl-volumes-$(date +%Y%m%d-%H%M%S).tar.gz" -C /volumes .
 docker start fishbowl
 ```
 
@@ -814,12 +843,14 @@ docker start fishbowl
 
 ```powershell
 docker stop fishbowl
-docker run --rm --platform linux/amd64 --entrypoint tar -v fishbowl-mysql:/volumes/mysql:ro -v fishbowl-app:/volumes/app:ro -v fishbowl-data:/volumes/data:ro -v "${PWD}:/backup" fishbowl -czf "/backup/fishbowl-volumes-$(Get-Date -Format yyyyMMdd).tar.gz" -C /volumes .
+docker run --rm --platform linux/amd64 --entrypoint tar -v fishbowl-mysql:/volumes/mysql:ro -v fishbowl-app:/volumes/app:ro -v fishbowl-data:/volumes/data:ro -v "${PWD}:/backup" fishbowl -czf "/backup/fishbowl-volumes-$(Get-Date -Format yyyyMMdd-HHmmss).tar.gz" -C /volumes .
 docker start fishbowl
 ```
 
 Restore into empty volumes with the same names (for example on a new machine,
-which can run a different system than the old one). Run it in the folder that
+which can run a different system than the old one). To go back after an upgrade,
+when the volumes aren't empty, use [the steps in section
+12](#if-something-goes-wrong-back-to-where-you-were) instead. Run it in the folder that
 holds the file, with your file's name, then start the container normally:
 
 **Linux and macOS**
@@ -828,38 +859,128 @@ holds the file, with your file's name, then start the container normally:
 docker run --rm --platform linux/amd64 --entrypoint tar \
   -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data \
   -v "$PWD":/backup fishbowl \
-  -xzpf /backup/fishbowl-volumes-20261117.tar.gz -C /volumes
+  -xzpf /backup/fishbowl-volumes-20261117-093000.tar.gz -C /volumes
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-docker run --rm --platform linux/amd64 --entrypoint tar -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data -v "${PWD}:/backup" fishbowl -xzpf /backup/fishbowl-volumes-20261117.tar.gz -C /volumes
+docker run --rm --platform linux/amd64 --entrypoint tar -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data -v "${PWD}:/backup" fishbowl -xzpf /backup/fishbowl-volumes-20261117-093000.tar.gz -C /volumes
 ```
 
 ## 12. Updating to a new Fishbowl version
 
-Each Fishbowl version is a new image, built after the installer on this
-repository's release is replaced ([section 14](#14-maintaining-this-repository)).
-First build it, the same on every system:
+When a new Fishbowl Advanced version comes out, the installer on this
+repository's GitHub release is replaced with the new one ([section
+14](#14-maintaining-this-repository)). The steps below move your server to it.
+Paste them one block at a time, in a terminal opened in the folder where the
+backup file should go, and read what each block prints before going on.
+
+Everything you have is in the three volumes: `fishbowl-mysql` (your databases),
+`fishbowl-app` (Fishbowl, its settings and your license) and `fishbowl-data`
+(the container's records, the import folder and backups). These steps replace
+the image and the container around them and never delete a volume. Step 3 first
+copies all three volumes into one file and reads it back, so you can always go
+back to exactly where you were.
+
+### Before you start: what keeps your data, and what deletes it
+
+**Safe, and all that the steps use:** `docker build`, `docker tag`, `docker
+stop`, `docker rm` without `-v`, `docker run` with the same three `-v`, `docker
+compose build` and `docker compose up -d`.
+
+**Deletes your data, so never run these during an update:** `docker compose
+down -v` (or `--volumes`), `docker volume rm`, `docker volume prune`, `docker
+system prune --volumes`, and in Docker Desktop **Troubleshoot → Clean / Purge
+data** or **Reset to factory defaults**. Uninstalling Docker Desktop deletes its
+volumes too.
+
+**Disk space:** in testing, the backup file was 773 MB for a new installation
+with a new company database. Yours adds your databases, compressed.
+
+### Step 1: Keep the version you have
+
+The same on every system:
+
+```sh
+docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
+docker images fishbowl
+```
+
+The list shows the image twice: as `fishbowl`, and with its version, for
+example `fishbowl:2026.10`. The version tag keeps it on your computer after the
+new build takes the name `fishbowl`, and it's what you'd go back to.
+
+### Step 2: Build the new version
+
+Fishbowl keeps running while this builds, which takes a few minutes. The same
+on every system:
 
 ```sh
 docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater/Docker_Testing.git#main"
+docker run --rm --platform linux/amd64 fishbowl version
+```
+
+With Compose, run `docker compose build` instead of the first line, in the
+folder with `compose.yaml`. With the ready-made image from [section
+3](#or-pull-a-ready-made-image-only-once-its-published), run its two lines
+(`docker pull`, then `docker tag … fishbowl`) instead.
+
+The last line prints the new version, for example `2026.11`. **Stop here if the
+build ended with an error, or if it prints the version you already have:**
+nothing has changed, and Fishbowl is still running as before. (The same version
+means the release doesn't have the new installer yet.) Otherwise give the new
+image its version tag too:
+
+```sh
 docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
 ```
 
-If the build finished without errors, replace the container. `docker stop`
-gives Fishbowl Server and MySQL their three minutes to shut down cleanly
-(`docker rm -f` wouldn't). Use the same `-p` and `TZ` values you started it
-with:
+### Step 3: Back up all three volumes
+
+This stops Fishbowl, which disconnects Fishbowl Clients, and leaves it stopped
+until step 4, so the backup holds exactly what you upgrade from. It writes
+`fishbowl-volumes-<date>-<time>.tar.gz` into the folder your terminal is in,
+then reads the whole file back and prints **Backup OK** with its name.
 
 **Linux and macOS**
 
 ```bash
+BACKUP="fishbowl-volumes-$(date +%Y%m%d-%H%M%S).tar.gz"
 docker stop fishbowl
+docker run --rm --platform linux/amd64 --entrypoint tar \
+  -v fishbowl-mysql:/volumes/mysql:ro -v fishbowl-app:/volumes/app:ro -v fishbowl-data:/volumes/data:ro \
+  -v "$PWD":/backup fishbowl -czf "/backup/$BACKUP" -C /volumes .
+docker run --rm --platform linux/amd64 --entrypoint tar -v "$PWD":/backup fishbowl -tzf "/backup/$BACKUP" > /dev/null && echo "Backup OK: $BACKUP" || echo "BACKUP FAILED: don't go on"
+```
+
+**Windows (PowerShell)**
+
+```powershell
+$BACKUP = "fishbowl-volumes-$(Get-Date -Format yyyyMMdd-HHmmss).tar.gz"
+docker stop fishbowl
+docker run --rm --platform linux/amd64 --entrypoint tar -v fishbowl-mysql:/volumes/mysql:ro -v fishbowl-app:/volumes/app:ro -v fishbowl-data:/volumes/data:ro -v "${PWD}:/backup" fishbowl -czf "/backup/$BACKUP" -C /volumes .
+docker run --rm --platform linux/amd64 --entrypoint tar -v "${PWD}:/backup" fishbowl -tzf "/backup/$BACKUP" > $null; if ($LASTEXITCODE -eq 0) { "Backup OK: $BACKUP" } else { "BACKUP FAILED: don't go on" }
+```
+
+**Go on only after Backup OK.** If it failed (a full disk is the usual reason),
+free some space and run the block again. Until step 4, `docker start fishbowl`
+brings your current version back up exactly as it was. The time in the name
+means a later backup never overwrites this one. Keep the file until you're sure
+the new version is fine, and keep a copy off this computer: it holds your
+license key and all your data, so store it the way you'd store the database.
+
+### Step 4: Start the new version on the same volumes
+
+`docker rm` removes only the container; the volumes stay, and the new container
+picks them up. Use the same `-p` and `TZ` values you started it with.
+
+**Linux and macOS**
+
+```bash
 docker rm fishbowl
 docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
-  -p 2456:2456 -p 127.0.0.1:6080:6080 \
+  -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \
   -e TZ=America/Denver \
   -v fishbowl-mysql:/var/lib/mysql \
   -v fishbowl-app:/opt/Fishbowl \
@@ -870,39 +991,85 @@ docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-tim
 **Windows (PowerShell)**
 
 ```powershell
-docker stop fishbowl
 docker rm fishbowl
-docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl fishbowl
 ```
 
-With Compose, in the folder with `compose.yaml`, on every system (if the build
-fails, the second command changes nothing):
+**With Compose**, in the folder with `compose.yaml`, on every system:
 
 ```sh
-docker compose build
 docker compose up -d
 ```
 
-**Nothing is upgraded until you say so.** The new image starts the installed
-version as before, and the page offers **Upgrade to Fishbowl X**: read and
+### Step 5: Upgrade
+
+**Nothing is upgraded until you accept it.** The new image starts your
+installed version as before, and the Fishbowl page (`docker exec fishbowl
+fishbowl-link` prints its link) offers **Upgrade to Fishbowl X**: read and
 accept the new version's license agreement and press **Back up and upgrade**.
-(At a terminal: `docker exec -it fishbowl fishbowl-upgrade`.) Only an
+At a terminal instead: `docker exec -it fishbowl fishbowl-upgrade`. Only an
 installation made by an earlier version of this image, which let you choose a
-MySQL password, is asked for that password too. A wrong one is caught before
+MySQL password, is asked for that password too; a wrong one is caught before
 anything is stopped.
 
-Then the container stops Fishbowl Server (Fishbowl Clients are disconnected),
-**backs up every database** to
-`/var/lib/fishbowl/backups/pre-upgrade-…sql.gz` (plus Fishbowl's settings files),
-runs the new installer over `/opt/Fishbowl` and starts Fishbowl Server again. It
-keeps your company name, license key, memory settings and data, and never
-re-initializes MySQL. On its first start after a new version, Fishbowl Server
-**updates your database**; on a large database that can take a while, and the
+Then the container stops Fishbowl Server, **dumps every database** to
+`/var/lib/fishbowl/backups/pre-upgrade-…sql.gz` (with Fishbowl's settings files),
+runs the new installer over `/opt/Fishbowl`, and starts Fishbowl Server again.
+It keeps your company name, license key, memory settings and data, and never
+re-initializes MySQL. On its first start on the new version, Fishbowl Server
+**updates your database**. On a large database that can take a while, and the
 container waits as long as it takes.
 
-**Before upgrading a production server, make a
-[whole-installation backup](#whole-installation-backup-all-three-volumes-container-stopped).**
-Downgrades are refused, so it's the way back if the new version doesn't work out.
+### Step 6: Check it
+
+- The page shows **Fishbowl X installed** and **Fishbowl Server is running** on
+  your company database.
+- Log in with a Fishbowl Client and look at a few recent orders and items.
+
+Once you're sure, you can delete the old image to save space, for example
+`docker image rm fishbowl:2026.10`. That removes the image only, never data.
+
+### If something goes wrong: back to where you were
+
+Fishbowl won't run an older version on volumes it has upgraded, so going back
+means putting the step 3 backup into the volumes and starting the old image.
+**This replaces everything in the three volumes with the backup:** anything
+entered after the backup is gone. To keep that too, run step 3 once more first;
+its new file won't overwrite the first one.
+
+Put your backup's file name (the one **Backup OK** printed) and your old version
+into the first two lines, then run the block in the folder that holds the file.
+The restore reads the whole file back before it deletes anything. If it prints
+**BACKUP FAILED**, the volumes are as they were and `docker start fishbowl`
+starts the container again. If anything else stops it (a full disk, say), free
+space and run the block again: it starts over from the file each time.
+
+**Linux and macOS**
+
+```bash
+BACKUP="fishbowl-volumes-20261117-093000.tar.gz"
+OLD="fishbowl:2026.10"
+docker stop fishbowl
+docker run --rm --platform linux/amd64 --entrypoint sh -e BACKUP="$BACKUP" \
+  -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data \
+  -v "$PWD":/backup "$OLD" -c 'tar -tzf /backup/$BACKUP > /dev/null || { echo BACKUP FAILED, the volumes were not changed; exit 1; }; find /volumes/mysql /volumes/app /volumes/data -mindepth 1 -delete && tar -xzpf /backup/$BACKUP -C /volumes && echo Restored from $BACKUP' && docker tag "$OLD" fishbowl && docker rm fishbowl
+```
+
+**Windows (PowerShell)**
+
+```powershell
+$BACKUP = "fishbowl-volumes-20261117-093000.tar.gz"
+$OLD = "fishbowl:2026.10"
+docker stop fishbowl
+docker run --rm --platform linux/amd64 --entrypoint sh -e "BACKUP=$BACKUP" -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data -v "${PWD}:/backup" $OLD -c 'tar -tzf /backup/$BACKUP > /dev/null || { echo BACKUP FAILED, the volumes were not changed; exit 1; }; find /volumes/mysql /volumes/app /volumes/data -mindepth 1 -delete && tar -xzpf /backup/$BACKUP -C /volumes && echo Restored from $BACKUP'
+if ($LASTEXITCODE -eq 0) { docker tag $OLD fishbowl; docker rm fishbowl }
+```
+
+After **Restored from …**, start it with step 4's `docker run` command, or
+`docker compose up -d`. The page shows your old version, running on your data
+as it was at the backup.
+
+### More about upgrades
 
 - **Trial installations are not offered the upgrade.** Fishbowl Server refuses
   to update a trial's database to a new version ("Trial accounts do not have
@@ -913,10 +1080,8 @@ Downgrades are refused, so it's the way back if the new version doesn't work out
 - **An upgrade that stopped half-way** (for example the computer lost power
   while the installer ran) leaves Fishbowl Server stopped, and the page offers to
   run the upgrade again. It never starts Fishbowl on half-updated program files.
-- **Keeping the old version:** that's what the version tag is for. Start the old
-  image (`fishbowl:2026.10`, or `image: fishbowl:2026.10` in `compose.yaml`).
 - **Downgrades are refused:** an older image on newer volumes starts nothing,
-  changes nothing, and the page says why.
+  changes nothing, and the page says why. That's why going back uses the backup.
 - If Fishbowl Server reports that it can't update the database, the page shows
   Fishbowl's reason ([Troubleshooting](#16-troubleshooting)).
 
@@ -1040,6 +1205,92 @@ password is turned down) and ask for it; nothing changes it for you. On those,
 the page's steps say to clear Server Administration's Password field and type
 your own password, because the pre-filled value is Fishbowl's default and not
 yours (I haven't run that path in a GUI test).
+
+### Network and firewall (licenses, plugins, Integrations)
+
+There's no firewall inside the container. Everything may go out, and Docker lets
+in only the ports you publish. So when a connection is blocked, it's blocked
+outside the container: by the firewall on the computer that runs Docker, the
+router, or the network.
+
+**What Fishbowl Server reaches on the internet.** Licenses and plugins depend on
+Fishbowl's servers, and so do modules in the Client's **Integrations** group
+(Accounting, Merchant Services, Plugins, and plugins such as ShipExpress).
+Fishbowl 26.10 contacts its servers by name. These names come from its own
+program files:
+
+| Name | Port | For |
+|---|---|---|
+| `fishbowlconnect.com` | 81 (HTTP) | Plugins: the list in the Plugins module and the plugin update check, which runs at every start |
+| `fishbowlconnect.com` | 443 | Plugin downloads, payments, what's new |
+| `artanis.fishbowldev.com` | 443 | License, subscription, feature and plugin checks |
+| `files.fishbowlinventory.com` | 80, 443 | The security patch list, file downloads |
+| `www.fishbowlinventory.com` | 443 | Fishbowl's web pages (help and sales links) |
+
+Integrations with other companies need their servers too, for example Intuit's
+(`quickbooks.api.intuit.com`, `appcenter.intuit.com` and others) for QuickBooks
+Online.
+
+Allow these by name if your firewall can. On 17 November 2026 the first four
+names all pointed at **74.63.56.90**. That isn't one of the addresses on
+Fishbowl's network cutsheet (97.75.181.39, 97.75.181.50 and 199.79.55.108), so a
+firewall that allows only the cutsheet's addresses blocks the license and plugin
+checks. `www.fishbowlinventory.com` is behind Cloudflare, whose addresses change.
+Port 81 is the one most often blocked. When it is, Fishbowl writes `Stream is
+invalid` followed by `java.net.ConnectException` to
+`/opt/Fishbowl/logs/fbserver.log` a few seconds after every start: that's the
+plugin update check failing.
+
+**Check it from the container:**
+
+```
+docker exec fishbowl fishbowl-netcheck
+```
+
+It tries each of these, and the cutsheet's addresses, from inside the container,
+shows what listens for the network, and says what's blocked and how (refused,
+no answer, or a name that doesn't resolve). The container also runs it once, a
+minute after every start, and writes a warning to its log (`docker logs
+fishbowl`) only when something can't be reached; `-e FISHBOWL_NETCHECK=0` turns
+that off. It tests whether a connection opens, so a proxy that lets the
+connection open and then stops the request can still get in the way.
+
+**What comes in.** Replies to Fishbowl Server's own connections come back on
+their own, through Docker and any ordinary (stateful) firewall. So the
+cutsheet's inbound lines from Fishbowl's servers need no rule and no port
+forward, and the same goes for its outbound lines from the server to the
+Clients. From your network:
+
+- **2456**, Fishbowl Clients: published.
+- **28192**, Fishbowl's API (the "Legacy Port"), for integrated apps and
+  integrations on other computers: published.
+- **3306**, MySQL: not published, on purpose. MySQL listens on the container's
+  own loopback, its root user can only log in from inside the container, and its
+  password is in this repository. Fishbowl Clients don't need it: their settings
+  point only at Fishbowl Server on 2456, and Fishbowl Server reaches the database
+  itself. **3305** is MySQL 5.7's port, which this image doesn't have.
+- **28182 and 28282** (the cutsheet's "Fishbowl Anywhere"): the HTTP and HTTPS
+  ports of the web client Fishbowl ships in `/opt/Fishbowl/webclient`, a Webswing
+  server. Nothing starts it here, so nothing listens. It's left off on purpose:
+  it would accept connections from any address, its user file ships with the same
+  two accounts in every Fishbowl installation, and the Fishbowl page already
+  shows the Client in a browser behind its access code.
+- **28292** (the cutsheet's "Fishbowl Nexus QuickBooks"): the port of
+  `Fishbowl Nexus.exe`, a Windows program. It can't run in this Linux container,
+  so a Nexus setup runs on a Windows computer, whose firewall then needs 28292.
+- **80, 81, 443 and 8080**: nothing in Fishbowl 26.10 listens on them here.
+  Publishing them would only hold those ports on your computer, and 80, 443 and
+  8080 are often taken already, which stops the container from starting.
+
+If a later Fishbowl version or feature listens on one of these, `fishbowl-netcheck`
+shows it. Publish it like 28192: `-p 28182:28182` on `docker run`, or a line
+under `ports:` in `compose.yaml`.
+
+**The firewall on the computer that runs Docker** has to let 2456 and 28192 in
+for other computers; the commands are under [the Fishbowl
+Client](#9-the-fishbowl-client-in-its-browser-window). Outgoing connections are
+allowed by default on Windows, macOS and Linux, so only a policy or security
+software that blocks them needs the names above added.
 
 ## 14. Maintaining this repository
 
@@ -1180,8 +1431,9 @@ options.
 |---|---|---|
 | 2456 | `-p 2456:2456` | Fishbowl Server's client port ("Port" in Server Administration; `webPort` in `eve.properties`). |
 | 6080 | `-p 127.0.0.1:6080:6080` | The Fishbowl page, including the browser windows (their screens travel over the page's WebSocket). |
-| 28192 | not published | "Legacy Port" (`port` in `eve.properties`). |
+| 28192 | `-p 28192:28192` | Fishbowl's API, the "Legacy Port" (`port` in `eve.properties`): integrated apps and integrations connect here. |
 | 3306, 33060 | never | MySQL, bound to 127.0.0.1 inside the container. |
+| 80, 81, 443, 3305, 8080, 28182, 28282, 28292 | not published | On Fishbowl's network cutsheet, but nothing listens on them in Fishbowl 26.10 (see [Network and firewall](#network-and-firewall-licenses-plugins-integrations)). |
 | 7770 | never | A Java debug port Fishbowl builds into its service launcher, bound to 127.0.0.1 inside the container. |
 
 The browser windows' VNC servers have no ports at all: they listen on Unix
@@ -1198,6 +1450,7 @@ The same on Linux, macOS and Windows.
 | `docker exec -it fishbowl fishbowl-upgrade` | An upgrade at a terminal instead of the page. |
 | `docker exec fishbowl fishbowl-admin` | Opens Server Administration and prints its link. |
 | `docker exec -it fishbowl fishbowl-backup` | Back up all of MySQL. |
+| `docker exec fishbowl fishbowl-netcheck` | Can the container reach the servers Fishbowl uses for licenses and plugins, and what listens for the network? Changes nothing. |
 | `docker exec fishbowl update-all.sh` | Update the container's Fedora packages now (also runs by itself at every start). Applies from the next start. |
 | `docker run -it --rm --platform linux/amd64 <the three -v> fishbowl restore FILE` | Restore a `fishbowl-backup` file (container stopped). |
 | `docker run --platform linux/amd64 … fishbowl admin` | Like the normal start, but Fishbowl Server stays stopped until you press Start on the page. |
@@ -1213,6 +1466,8 @@ The same on Linux, macOS and Windows.
 | `FISHBOWL_ALLOW_TRIAL_UPGRADE` | `0` | `1` offers the upgrade to a trial installation. Fishbowl Server refuses to update a trial's database, so this only works when the new version doesn't change the database; the test suite uses it. |
 | `FISHBOWL_AUTO_UPDATE` | `1` | `0` turns off the update of the container's Fedora packages at each start (see section 12). |
 | `FISHBOWL_UPDATE_DELAY` | `90` | Seconds after the container starts before the update begins. |
+| `FISHBOWL_NETCHECK` | `1` | `0` turns off the network check a minute after each start (it only writes a warning to the log when Fishbowl's servers can't be reached). |
+| `FISHBOWL_NETCHECK_DELAY` | `60` | Seconds after the container starts before that check. |
 | `FISHBOWL_UPDATE_TIMEOUT` | `1800` | Seconds before an update is given up on. |
 | `FISHBOWL_ALLOW_NO_VOLUMES` | `0` | `1` skips the check that the three data paths are volumes (throwaway tests only). |
 
@@ -1351,6 +1606,7 @@ data, so recreating it costs nothing:
 | Symptom | Fix |
 |---|---|
 | The page doesn't load | The container needs `-p 127.0.0.1:6080:6080` (or Compose's `ports:`), and you must open it on the computer that runs Docker. `docker ps` shows the published ports. Recreate the container with the port; your data is on the volumes. |
+| The Integrations group, the Plugins list or a plugin is missing or empty | Run `docker exec fishbowl fishbowl-netcheck`. It shows whether the container reaches Fishbowl's license and plugin servers, and what blocks them. See [Network and firewall](#network-and-firewall-licenses-plugins-integrations). |
 | "That access code isn't right" / the link stopped working | Get the current link: `docker exec fishbowl fishbowl-link`. Someone may have replaced the code (`--new-code`). |
 | Fishbowl Server didn't start: "Trial accounts do not have access to update the database" | The selected database was made by an older Fishbowl version, and a trial installation can't update it. Enter a purchased license (Server Administration → License) and press Start, or select another database. Nothing was changed in the database. |
 | Fishbowl Server didn't start, with another reason from Fishbowl | Open Server Administration from the page to check the license and the database, then press Start. Fishbowl's own log: `docker exec fishbowl tail -n 50 /opt/Fishbowl/logs/fbserver.log`. |
@@ -1422,6 +1678,15 @@ repeats the checks marked *(suite)*.
 | Killed without a clean shutdown, with a stale MySQL lock file that used to stop MySQL from starting | Reproduced the failure, then verified the fix *(suite)* |
 | Docker restarted (the test machine rebooted three times): the container came back to running by itself with `--restart always` | Observed |
 | Recreating the container on the same volumes: no questions, same data; a second container on the same volumes refused | Verified *(suite)* |
+| No database ships in the image: the folders that become its volumes hold no files, and its only `.sql` files are two that MySQL's own package installs | Verified *(suite)* |
+| A new installation starts with no database: after setup MySQL holds only its system databases (`information_schema`, `mysql`, `performance_schema`, `sys`), none is selected, the import folder is empty | Verified *(suite)* |
+| `docker compose down -v` removes the three fixed-name volumes; `docker compose up -d --force-recreate` keeps them | Checked with a stand-in compose project (Docker Compose v5.7.0) |
+| Network: there's no firewall inside the container; Fishbowl Server listens for the network on 2456 and 28192 only (MySQL and 7770 on the container's loopback); both answer through their published ports | Verified *(suite)*, and the listeners listed by hand with Fishbowl Server running |
+| `fishbowl-netcheck` and the warning a minute after start: they report Fishbowl's servers by name, the cutsheet's addresses and what listens, and warn exactly when something is blocked | Verified *(suite)* in a network that refuses outbound port 81, as a firewall would. Not run where Fishbowl's servers are reachable (this test network passes 80 and 443 through a proxy). |
+| What Fishbowl 26.10 contacts: the names and ports read from its program files; on 17 November 2026 the license and plugin names pointed at 74.63.56.90; the plugin update check fails at every start when port 81 is blocked (`Stream is invalid` in `fbserver.log`) | Checked by hand |
+| The Windows and Linux firewall commands for 2456 and 28192 | **Not run** (no Windows here, and no firewalld in the test machine) |
+| Updating (section 12), run end to end in bash from the README's own blocks, on a trial installation with a company database: steps 1 to 6 (the old image kept by tag, the new one built, the backup written and read back, the new image on the same volumes, the upgrade, every table checksum unchanged), a damaged backup refused with the volumes untouched and `docker start` bringing it back, then going back to the backup (the old version runs on the data exactly as at the backup) | Verified once. The build read a local copy of this repository and a stand-in for the GitHub release, and the "new version" was the same installer named 2026.10.1, so Fishbowl's own database update at first start of a really new version wasn't exercised. |
+| The same blocks in zsh and in PowerShell 7 hand `docker` exactly the same arguments as in bash | Checked against a stand-in `docker` that records its arguments. Not run on Windows, in Windows PowerShell 5.1 or on a Mac; Compose's `docker compose build` from GitHub not run here. |
 | After setup: MySQL 8.4.10, `lower_case_table_names = 1`, heap 8192 MB, client 2048 MB, non-root processes, *healthy* | Verified *(suite)* |
 | License key and the MySQL password absent from `docker logs`; the password not written into the volumes | Verified *(suite)* |
 | Upgrade on the page (a stand-in newer version): offered, not without acceptance, a wrong password given on the page caught early, backup, upgrade, data and memory kept; an interrupted upgrade is finished before Fishbowl starts; downgrade refused; a trial isn't offered the upgrade | Verified *(suite)* |

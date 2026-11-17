@@ -2,3 +2,6 @@
 *
 !build/
 !rootfs/
+# Never let a database backup into the image, even one dropped into those folders.
+**/*.sql
+**/*.sql.gz

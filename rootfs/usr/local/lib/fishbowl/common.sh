@@ -499,7 +499,7 @@ volume_name_for() {
 
 print_run_command() {  # print_run_command [docker-only]
   note "  docker run -d --name fishbowl --restart always --stop-timeout 180 \\"
-  note "    -p 2456:2456 -p 127.0.0.1:6080:6080 \\"
+  note "    -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \\"
   note "    -v $(volume_name_for "$MYSQL_DATA" fishbowl-mysql):/var/lib/mysql \\"
   note "    -v $(volume_name_for "$FB_HOME" fishbowl-app):/opt/Fishbowl \\"
   note "    -v $(volume_name_for "$DATA_DIR" fishbowl-data):/var/lib/fishbowl \\"

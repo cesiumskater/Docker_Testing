@@ -77,11 +77,14 @@ class Box:
         """Start it the way the README does: detached, no terminal."""
         args = ["docker", "run", "-d", "--name", self.name, "--stop-timeout", "180",
                 "-p", f"127.0.0.1:{self.port}:2456", "-p", f"127.0.0.1:{self.port + 1}:6080",
-                "-p", f"127.0.0.1:{self.port + 2}:5999", "-p", f"127.0.0.1:{self.port + 3}:5998"]
+                "-p", f"127.0.0.1:{self.port + 2}:5999", "-p", f"127.0.0.1:{self.port + 3}:5998",
+                "-p", f"127.0.0.1:{self.port + 4}:28192"]
         for e in env:
             args += ["-e", e]
         if not any(e.startswith("FISHBOWL_AUTO_UPDATE=") for e in env):
             args += ["-e", "FISHBOWL_AUTO_UPDATE=0"]   # the "update" checks turn it on; the others must not wait on dnf
+        if not any(e.startswith("FISHBOWL_NETCHECK_DELAY=") for e in env):
+            args += ["-e", "FISHBOWL_NETCHECK_DELAY=5"]   # the start-up network check, soon enough to look for it
         r = sh(*args, *self.volume_args, image or self.image, *command)
         expect(r.returncode == 0, "docker run failed: " + r.stderr.strip())
         self._page = None
@@ -154,6 +157,20 @@ class Box:
             with socket.create_connection(("127.0.0.1", self.port), timeout=5) as s:
                 s.sendall(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
                 return s.recv(16).startswith(b"HTTP/")
+        except OSError:
+            return False
+
+    def api_port_open(self):
+        """Does Fishbowl Server listen behind the published API port (28192)? It waits
+        for a request instead of answering a bare connection, so a connection that
+        stays open means something listens; Docker closes it at once when nothing does."""
+        try:
+            with socket.create_connection(("127.0.0.1", self.port + 4), timeout=5) as s:
+                s.settimeout(3)
+                try:
+                    return s.recv(1) != b""
+                except socket.timeout:
+                    return True
         except OSError:
             return False
 
@@ -272,6 +289,15 @@ def runtime(a):
     check("the acceptance is on record, with how it was given", lambda: expect(
         "Fishbowl page" in box.exec("sh", "-c", "cat /var/lib/fishbowl/state/eula/accepted-*").stdout))
 
+    def starts_with_no_database():
+        st = page.status()
+        expect(st.get("database", "") == "", f"a database is already selected: {st.get('database')!r}")
+        extra = schemas(box)
+        expect(not extra, f"MySQL already holds databases: {sorted(extra)}")
+        expect(st.get("imports") == [], f"the import folder isn't empty: {st.get('imports')}")
+    check("a new installation starts with no database: MySQL holds only its own system databases, "
+          "none is selected, the import folder is empty", starts_with_no_database)
+
     def create_database():
         page.open_window("admin")
         start_bridge(box.name)
@@ -303,6 +329,25 @@ def runtime(a):
     check("the page's web server runs as its own non-root user", lambda: expect(
         box.exec("bash", "-c", "ps -o user= -p \"$(pgrep -f portal.py | head -n 1)\"").stdout.strip() == "fbweb"))
     check("Fishbowl Clients can reach the published port", lambda: expect(box.client_port_open()))
+    check("Fishbowl's API port (28192, integrated apps and integrations) listens behind its published port",
+          lambda: expect(box.api_port_open()))
+
+    def netcheck():
+        r = box.exec("fishbowl-netcheck")
+        out = r.stdout
+        expect(r.returncode in (0, 1), f"exit {r.returncode}: {r.stderr[-300:]}")
+        for want in ("fishbowlconnect.com:81", "artanis.fishbowldev.com:443", "97.75.181.39:81",
+                     "Listening for the network"):
+            expect(want in out, f"{want!r} missing from the report")
+        listening = out.split("Listening for the network", 1)[1]
+        expect(re.search(r"^  2456 ", listening, re.M) and re.search(r"^  28192 ", listening, re.M),
+               "2456 and 28192 should be listed as listening")
+        expect(not re.search(r"^  3306 ", listening, re.M), "MySQL must not listen for the network")
+        # The check at start-up said the same thing in the log: a warning exactly when something is blocked.
+        warned = "Fishbowl's servers can't be reached from this container" in box.logs()
+        expect(warned == (r.returncode == 1), f"netcheck exit {r.returncode}, warning in the log: {warned}")
+    check("fishbowl-netcheck reports Fishbowl's servers and what listens; the log warns exactly when one is blocked",
+          netcheck)
 
     def healthy():
         for _ in range(40):

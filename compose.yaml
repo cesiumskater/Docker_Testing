@@ -4,7 +4,8 @@
 #       docker compose up -d
 #   Then open the Fishbowl page. Its link, with the access code:
 #       docker exec fishbowl fishbowl-link
-#   After the installer on GitHub changes (a new Fishbowl version):
+#   After the installer on GitHub changes (a new Fishbowl version), follow
+#   README section 12, which backs up all three volumes first. In short:
 #       docker compose build
 #       docker compose up -d
 #     The page then offers the upgrade; nothing changes until you accept it there.
@@ -35,6 +36,7 @@ services:
     stop_grace_period: 3m
     ports:
       - "2456:2456"            # Fishbowl Clients connect here
+      - "28192:28192"          # Fishbowl's API: integrated apps and integrations
       - "127.0.0.1:6080:6080"  # the Fishbowl page; this computer only
     volumes:
       - fishbowl-mysql:/var/lib/mysql

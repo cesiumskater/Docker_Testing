@@ -118,8 +118,9 @@ LABEL org.opencontainers.image.title="Fishbowl Advanced for Linux (Docker)" \
 # ones, and the Fishbowl page warns about that.
 VOLUME ["/var/lib/mysql", "/opt/Fishbowl", "/var/lib/fishbowl"]
 
-# 2456: Fishbowl Clients. 6080: the Fishbowl page (publish it on 127.0.0.1 only).
-EXPOSE 2456 6080
+# 2456: Fishbowl Clients. 28192: Fishbowl's API ("Legacy Port"), for integrated
+# apps and integrations. 6080: the Fishbowl page (publish it on 127.0.0.1 only).
+EXPOSE 2456 28192 6080
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10m --retries=3 \
   CMD ["/usr/local/bin/fishbowl-healthcheck"]

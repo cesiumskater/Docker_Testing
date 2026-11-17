@@ -39,6 +39,7 @@ START_PAUSED=0          # the `admin` command
 FB_LOG_OFFSET=0
 PORTAL_PID=""
 UPDATE_PID=""           # update-all.sh, started in the background at every start
+NETCHECK_PID=""         # fishbowl-netcheck --log, once, shortly after every start
 PORTAL_RESTARTS=0
 JOB_PID=""              # a setup or upgrade child in progress
 EXPECT_SETUP=0          # 1 while waiting for first-time setup answers
@@ -65,6 +66,7 @@ on_exit() {
   fishbowl_stop
   mysql_stop
   system_update_stop
+  netcheck_stop
   portal_stop
   rm -rf "$WEB_SPOOL"   # requests nobody will read now (they may hold answers)
   set_status stopped
@@ -91,6 +93,23 @@ system_update_start() {
   # Its own session (so stopping it can reach dnf too), low priority, no input.
   setsid "$BIN_DIR/update-all.sh" --at-start </dev/null &
   UPDATE_PID=$!
+}
+# Once per start, a minute in: can the container reach the servers Fishbowl
+# uses for licenses and plugins? Writes one warning to the container log only
+# when it can't (details: fishbowl-netcheck). FISHBOWL_NETCHECK=0 turns it off.
+netcheck_start() {
+  [ "${FISHBOWL_NETCHECK:-1}" != 0 ] || return 0
+  [ -x "$BIN_DIR/fishbowl-netcheck" ] || return 0
+  ( trap 'exit 0' TERM
+    sleep "${FISHBOWL_NETCHECK_DELAY:-60}" & wait $!
+    exec nice -n 19 timeout 60 "$BIN_DIR/fishbowl-netcheck" --log ) </dev/null &
+  NETCHECK_PID=$!
+}
+netcheck_stop() {
+  [ -n "$NETCHECK_PID" ] || return 0
+  kill -TERM "$NETCHECK_PID" 2>/dev/null || true
+  wait "$NETCHECK_PID" 2>/dev/null || true
+  NETCHECK_PID=""
 }
 # Stopping the container: let a package that is half-installed finish, but not
 # for long (Docker gives the container 10 seconds unless it was started with
@@ -287,7 +306,7 @@ unnamed_volumes_text() {
   note "Nothing set up yet? Start over with named volumes:"
   note "  docker rm -f ${HOSTNAME:-<this container>}"
   note "  docker run -d --name fishbowl --restart always --stop-timeout 180 \\"
-  note "    -p 2456:2456 -p 127.0.0.1:6080:6080 \\"
+  note "    -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \\"
   note "    -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl \\"
   note "    -v fishbowl-data:/var/lib/fishbowl ${FISHBOWL_IMAGE:-fishbowl}"
   note ""
@@ -840,6 +859,7 @@ cmd_run() {
   portal_start
   print_page_link
   system_update_start   # in the background; waits its turn behind setup and upgrades
+  netcheck_start        # in the background; one warning line if Fishbowl's servers can't be reached
 
   case "$(detect_state)" in
     # Settings changed in Server Administration (a purchased license, say) count

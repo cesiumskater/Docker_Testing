@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+# Database backups stay out of the repository (they hold company data).
+*.sql
+*.sql.gz
