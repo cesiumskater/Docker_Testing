@@ -85,7 +85,7 @@ RUN groupadd --gid 1000 fishbowl \
 # Permissions are set here, not taken from the repository: files uploaded
 # through GitHub's web page lose their executable bit.
 COPY rootfs/ /
-RUN chmod 0755 /usr/local/bin/fishbowl-* /usr/local/lib/fishbowl/verify-runtime.sh \
+RUN chmod 0755 /usr/local/bin/fishbowl-* /usr/local/bin/update-all.sh /usr/local/lib/fishbowl/verify-runtime.sh \
  && chmod 0644 /usr/local/lib/fishbowl/*.sh /usr/local/lib/fishbowl/*.py /usr/local/lib/fishbowl/*.xml /usr/local/lib/fishbowl/mysql-root-password.txt \
         /etc/my.cnf.d/90-fishbowl.cnf \
  && chmod 0755 /usr/local/lib/fishbowl/verify-runtime.sh \

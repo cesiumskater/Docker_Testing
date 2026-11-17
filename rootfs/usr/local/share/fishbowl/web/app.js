@@ -106,14 +106,14 @@
   }
 
   // ------------------------------------------------------------ rendering
-  // The MySQL root password goes into every <code class="mysql-pw"> in the instructions.
+  // The image's MySQL root password is never shown or sent to the browser: Fishbowl
+  // fills the Password field in by itself. Only an installation made by an earlier
+  // version of this image has a password of its own to type (and to give for upgrades).
   function showRootPassword(s) {
-    const text = s.mysql_root_password || 'the MySQL root password you chose when this installation was set up';
-    for (const el of document.querySelectorAll('.mysql-pw')) {
-      if (el.textContent !== text) el.textContent = text;
-      el.classList.toggle('secret-text', !!s.mysql_root_password);
-    }
-    show($('upgrade-pw-card'), s.root_password_kind === 'own');
+    const own = s.root_password_kind === 'own';
+    for (const el of document.querySelectorAll('.pw-image')) show(el, !own);
+    for (const el of document.querySelectorAll('.pw-own')) show(el, own);
+    show($('upgrade-pw-card'), own);
   }
 
   function render(s) {
@@ -240,6 +240,7 @@
 
   // What to say about a backup, given the Fishbowl installed here.
   function madeByNote(f, s) {
+    if (f.made_by === 'n/a') return ['', ''];   // not a .sql file, nothing to read
     if (f.made_by === null || f.made_by === undefined) return ['Reading…', ''];
     if (f.made_by === '') return ['Unknown', "No Fishbowl version found in this file. Is it a backup made by Fishbowl?"];
     const label = 'Fishbowl ' + f.made_by;
@@ -397,8 +398,7 @@
   async function upload() {
     const file = $('upload-file').files[0];
     uploadMessage('');
-    if (!file) return uploadMessage('Choose a .sql file first.', true);
-    if (!/\.sql$/i.test(file.name)) return uploadMessage("Only .sql files can be uploaded here: Fishbowl's Restore tab lists .sql files. Unzip the backup first if it's zipped.", true);
+    if (!file) return uploadMessage('Choose a file first.', true);
     $('upload-button').disabled = true;
     try {
       await api('POST', '/api/imports-check', { name: file.name, size: file.size });
@@ -422,7 +422,7 @@
       let data = {};
       try { data = JSON.parse(xhr.responseText); } catch (e) { /* not JSON */ }
       if (xhr.status === 200) {
-        uploadMessage('Uploaded ' + data.name + ' (' + fmtSize(data.size) + '). In Server Administration, Restore tab: magnifier, then the import folder.');
+        uploadMessage('Uploaded ' + data.name + ' (' + fmtSize(data.size) + '). In Server Administration, open the file chooser and go to the import folder.');
         $('upload-file').value = '';
       } else if (xhr.status === 401) {
         location.href = '/login';

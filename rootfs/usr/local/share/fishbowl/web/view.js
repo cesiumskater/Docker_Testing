@@ -82,6 +82,8 @@ function connect() {
   rfb = new RFB($('screen'), url, { shared: true });
   rfb.scaleViewport = false;
   rfb.resizeSession = true;      // the window's screen follows the size of this tab
+  rfb.qualityLevel = 8;          // JPEG quality for pictures (noVNC's default is 6); text is never compressed lossily
+  rfb.compressionLevel = 2;      // light compression: cheap on the container's CPU, and on a LAN the bytes don't matter
   rfb.focusOnClick = true;
   rfb.background = '#26303c';
   rfb.addEventListener('connect', () => {
@@ -196,20 +198,13 @@ armable($('force-close'), async () => {
 });
 open();
 
-// The MySQL root password for the "Password" step of Server Administration. The
-// Fishbowl window is Java, so the easy way in is the clipboard box above: one
-// click puts the password there, then click the field in the window and press Ctrl+V.
+// The "Password" step of Server Administration. The image's MySQL root password is
+// never shown or sent to the browser: Fishbowl fills the field in itself, with the
+// right password. Only an installation made by an earlier version of this image (a
+// password its owner chose) needs it typed.
 (async () => {
-  let pw = '';
-  try { pw = (await getStatus()).mysql_root_password || ''; } catch (e) { /* the page shows the rest anyway */ }
-  const text = pw || 'the MySQL root password you chose when this installation was set up';
-  for (const el of document.querySelectorAll('.mysql-pw')) el.textContent = text;
-  if (!pw) return;
-  for (const btn of document.querySelectorAll('.mysql-pw-copy')) {
-    show(btn, true);
-    btn.addEventListener('click', () => {
-      $('clip').value = pw;
-      if (rfb) rfb.clipboardPasteFrom(pw);
-    });
-  }
+  let kind = 'image';
+  try { kind = (await getStatus()).root_password_kind || 'image'; } catch (e) { /* keep the usual steps */ }
+  for (const el of document.querySelectorAll('.pw-image')) show(el, kind !== 'own');
+  for (const el of document.querySelectorAll('.pw-own')) show(el, kind === 'own');
 })();

@@ -10,7 +10,7 @@
 #                     without touching GitHub. Needed unless --only runtime
 #                     together with --image.
 #   --image IMAGE     Test this image instead of building one (runtime checks).
-#   --only GROUP      build | runtime | upgrade | reference (default: all)
+#   --only GROUP      build | runtime | update | upgrade | reference (default: all)
 #   --reference-sql FILE
 #                     A known-good backup made by Fishbowl (a .sql from Backup
 #                     Database or the Schedule module). The reference checks
@@ -166,7 +166,7 @@ if want build; then
 fi
 
 # ------------------------------------------------- runtime and upgrade -----
-if want runtime || want upgrade || want reference; then
+if want runtime || want update || want upgrade || want reference; then
   [ -n "$IMAGE" ] || { echo "no image to test" >&2; exit 2; }
   [ -n "$VNCDO" ] || { echo "vncdotool not found (pip install vncdotool, or set VNCDO)" >&2; exit 2; }
   "$PYTHON" -c 'import PIL' 2>/dev/null ||
@@ -177,6 +177,10 @@ if want runtime; then
   echo "== runtime checks on $IMAGE"
   docker volume ls -q --filter name=fbcheck- | xargs -r docker volume rm >/dev/null 2>&1
   scenarios runtime
+fi
+if want update; then
+  echo "== system update checks (the last one needs the Fedora repositories, so network access)"
+  scenarios update
 fi
 if want reference; then
   if [ -n "$REFERENCE_SQL" ]; then

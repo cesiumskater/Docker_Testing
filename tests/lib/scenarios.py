@@ -2,6 +2,7 @@
 """The acceptance checks that need a running container. Started by run-checks.sh.
 
     scenarios.py runtime --image IMG --password PW --port 47010 --work DIR
+    scenarios.py update --image IMG --password PW --port 47010 --work DIR
     scenarios.py upgrade --image IMG --next NEWER_IMG --password PW --port 47010 --work DIR
     scenarios.py reference --image IMG --reference-sql BACKUP.sql --password PW --port 47010 --work DIR
 
@@ -79,6 +80,8 @@ class Box:
                 "-p", f"127.0.0.1:{self.port + 2}:5999", "-p", f"127.0.0.1:{self.port + 3}:5998"]
         for e in env:
             args += ["-e", e]
+        if not any(e.startswith("FISHBOWL_AUTO_UPDATE=") for e in env):
+            args += ["-e", "FISHBOWL_AUTO_UPDATE=0"]   # the "update" checks turn it on; the others must not wait on dnf
         r = sh(*args, *self.volume_args, image or self.image, *command)
         expect(r.returncode == 0, "docker run failed: " + r.stderr.strip())
         self._page = None
@@ -274,12 +277,12 @@ def runtime(a):
         start_bridge(box.name)
         g = box.gui("create")
         g.locate()
-        g.create_database("fbcheck", pw, box.tables)
+        g.create_database("fbcheck", None, box.tables)   # Password left as Fishbowl filled it in
         g.select_database(0)
         page.wait_window_closed("admin", 120)
         st = page.wait_state("running", 600)
         expect(st["database"] == "fbcheck", f"database is {st['database']!r}")
-    ok = check("Server Administration in its browser window: create a database -> Fishbowl Server starts by itself", create_database)
+    ok = check("Server Administration in its browser window: create a database, Password left as Fishbowl filled it in -> Fishbowl Server starts by itself", create_database)
     if not ok:
         return
 
@@ -310,9 +313,16 @@ def runtime(a):
     check("Docker reports the container healthy", healthy)
 
     key = box.exec("python3", "-I", "/usr/local/lib/fishbowl/props.py", "get", "/opt/Fishbowl/server/bin/eve.properties", "licenseKey").stdout.strip()
-    check("the page shows the image's MySQL password to the signed-in person, and MySQL accepts it", lambda: expect(
-        page.status().get("root_password_kind") == "image" and page.status().get("mysql_root_password") == pw
-        and box.sql("SELECT 1") == "1"))
+    def password_never_shown():
+        st = page.status()
+        expect(st.get("root_password_kind") == "image" and "mysql_root_password" not in st, str(st))
+        # nothing the page serves to a signed-in browser contains it either
+        for p in ("/", "/admin", "/client", "/api/status", "/static/app.js", "/static/view.js",
+                  "/static/index.html", "/static/view.html"):
+            body = page.get_text(p)
+            expect(len(body) > 100 and pw not in body, p + " is empty or contains the MySQL password")
+        expect(box.sql("SELECT 1") == "1")
+    check("the MySQL password is never shown on the page or sent to the browser, and MySQL accepts it", password_never_shown)
     check("MySQL password not in docker logs", lambda: expect(pw not in box.logs()))
     check("license key not in docker logs", lambda: expect(not key or key not in box.logs()))
     # Fishbowl's own installer lists this same password (variable mysql8Password in
@@ -415,20 +425,22 @@ def runtime(a):
         stored = page.upload(dump)
         files = {f["name"]: f["size"] for f in page.status()["imports"]}
         expect(files.get(stored) == os.path.getsize(dump), f"import folder has {files}")
-        try:
-            page.upload(dump, "notes.txt")
-        except PageError as e:
-            expect(e.status == 400)
-        else:
-            raise AssertionError("a .txt upload was accepted")
-    ok = check("upload a .sql backup on the page (other file types refused)", upload)
+        # any file type can be uploaded (reports, spreadsheets, images ...), and nothing is read from it
+        for other in ("notes.txt", "ReorderReport.jasper", "archive.tar.gz"):
+            stored2 = page.upload(dump, other)
+            expect(stored2 == other, f"{other} was stored as {stored2}")
+        names = {f["name"] for f in page.status()["imports"]}
+        expect({"notes.txt", "ReorderReport.jasper", "archive.tar.gz"} <= names, str(names))
+        for other in ("notes.txt", "ReorderReport.jasper", "archive.tar.gz"):
+            box.exec("rm", "-f", "/var/lib/fishbowl/import/" + other)
+    ok = check("upload a .sql backup on the page, and files of other types are accepted too", upload)
 
     def restore_in_gui():
         page.open_window("admin")
         start_bridge(box.name)
         g = box.gui("restore")
         g.locate()
-        g.restore("/var/lib/fishbowl/import/" + os.path.basename(dump), "fbrestored", pw, box.tables)
+        g.restore("/var/lib/fishbowl/import/" + os.path.basename(dump), "fbrestored", None, box.tables)
         expect(box.sql("SELECT v FROM fbrestored.zz_fbcheck_marker") == "kept", "the restored database lacks the backup's data")
         g.select_database(1)     # the list is sorted by name: fbcheck, fbrestored
         page.wait_window_closed("admin", 120)
@@ -436,7 +448,7 @@ def runtime(a):
         expect(st["pending_settings"] and st["pending_database"] == "fbrestored" and st["database"] == "fbcheck",
                f"pending={st['pending_settings']} pending_database={st['pending_database']!r} database={st['database']!r}")
     if ok:
-        ok = check("Restore tab: restore the upload into a new database and select it (takes effect at the restart)", restore_in_gui)
+        ok = check("Restore tab: restore the upload into a new database, Password left as Fishbowl filled it in, and select it (takes effect at the restart)", restore_in_gui)
 
     def restart_on_page():
         page.server("restart")
@@ -502,7 +514,7 @@ def runtime(a):
             except Exception:
                 pass
             time.sleep(3)
-        expect(st.get("root_password_kind") == "own" and st.get("mysql_root_password") == "", str(st))
+        expect(st.get("root_password_kind") == "own" and "mysql_root_password" not in st, str(st))
         s = Session(["docker", "exec", "-it", box.name, "fishbowl-backup"], os.devnull)
         s.expect(r"MySQL root password: ", 120)
         s.sendline(own)
@@ -516,6 +528,168 @@ def runtime(a):
     check("an earlier installation's own MySQL password: the page says so, and fishbowl-backup asks for it", earlier_installation)
 
     box.remove()
+
+
+# ------------------------------------------------------------------- update --
+# update-all.sh: the logic with a stand-in dnf (what it excludes, how it ends,
+# what it never does), then once for real inside a container that has just
+# started.
+STUB_DNF = r"""#!/bin/bash
+echo "dnf $*" >> /stub/calls
+case " $* " in
+  *" repoquery "*) printf '%s' "${STUB_CANDIDATES:-}"; exit "${STUB_REPO_RC:-0}" ;;
+  *" upgrade "*) [ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"; echo "pkg-new-1.0" >> /stub/pkgs; exit "${STUB_DNF_RC:-0}" ;;
+esac
+exit 0
+"""
+STUB_RPM = "#!/bin/bash\ncat /stub/pkgs\n"
+STUB_SETCAP = "#!/bin/bash\necho \"setcap $*\" >> /stub/calls\nexit 0\n"
+STUB_VERIFY = "#!/bin/bash\necho verify >> /stub/calls\nexit \"${STUB_VERIFY_RC:-0}\"\n"
+
+
+def update(a):
+    import tempfile
+    image = a.image
+    stub = tempfile.mkdtemp(prefix="stub-", dir=a.work if os.path.isdir(a.work) else None)
+    os.makedirs(stub, exist_ok=True)
+    for name, body in (("dnf", STUB_DNF), ("rpm", STUB_RPM), ("setcap", STUB_SETCAP), ("verify", STUB_VERIFY)):
+        with open(os.path.join(stub, name), "w") as f:
+            f.write(body.replace("\\n", "\n"))
+        os.chmod(os.path.join(stub, name), 0o755)
+
+    def run_script(script, **env):
+        """The real update-all.sh from the image, with the stand-ins in front of dnf, rpm and setcap."""
+        with open(os.path.join(stub, "pkgs"), "w") as f:
+            f.write("base-1.0\n")
+        open(os.path.join(stub, "calls"), "w").close()
+        envargs = []
+        for k, v in env.items():
+            envargs += ["-e", f"{k}={v}"]
+        r = sh("docker", "run", "--rm", "--entrypoint", "bash", "-v", f"{stub}:/stub",
+               "-e", "PATH=/stub:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+               "-e", "FISHBOWL_UPDATE_VERIFY=/stub/verify", *envargs, image, "-c", script)
+        with open(os.path.join(stub, "calls")) as f:
+            calls = f.read()
+        return r, calls
+
+    GOOD = "mysql-server 8.4.13\ntemurin-21-jdk 21.0.14\n"
+
+    def normal():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh", STUB_CANDIDATES=GOOD)
+        expect(r.returncode == 0, r.stdout[-300:] + r.stderr[-300:])
+        expect("--exclude" not in calls, calls)
+        expect("--enablerepo=adoptium-temurin-java-repository" in calls, "Java's repository was not switched on")
+        expect("verify" in calls and "setcap -r /usr/libexec/mysqld" in calls, calls)
+        expect("1 package(s) updated" in r.stdout, r.stdout[-300:])
+        expect("autoremove" not in calls and "reboot" not in r.stdout.lower().replace("no reboot", ""), "it must not autoremove or mention a reboot")
+    check("update-all.sh: updates through dnf with Java's repository on, fixes mysqld's capability, runs the runtime check", normal)
+
+    def mysql9():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh", STUB_CANDIDATES="mysql-server 9.1.0\ntemurin-21-jdk 21.0.14\n")
+        up = [l for l in calls.splitlines() if " upgrade" in l][0]
+        expect("--exclude=mysql*" in up and "--exclude=temurin" not in up, up)
+    check("update-all.sh: a MySQL that isn't 8.4 is left out, the rest still updates", mysql9)
+
+    def java25():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh", STUB_CANDIDATES="temurin-25-jdk 25.0.1\n")
+        up = [l for l in calls.splitlines() if " upgrade" in l][0]
+        expect("--exclude=temurin-*" in up, up)
+    check("update-all.sh: a Java that isn't 21 is left out", java25)
+
+    def verify_fails():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh", STUB_CANDIDATES=GOOD, STUB_VERIFY_RC=1)
+        expect(r.returncode == 2 and "FAILED" in r.stdout, f"{r.returncode}: {r.stdout[-300:]}")
+    check("update-all.sh: a failing runtime check after the update ends with status 2 and says what to do", verify_fails)
+
+    def offline():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh", STUB_REPO_RC=1)
+        expect(r.returncode == 1 and " upgrade" not in calls, f"{r.returncode}: {calls}")
+    check("update-all.sh: repositories unreachable -> nothing is changed, status 1", offline)
+
+    def dnf_fails():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh", STUB_CANDIDATES=GOOD, STUB_DNF_RC=1)
+        expect(r.returncode == 1 and "dnf failed" in r.stdout, f"{r.returncode}: {r.stdout[-300:]}")
+    check("update-all.sh: dnf failing is reported, status 1", dnf_fails)
+
+    def off_switch():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh --at-start; echo rc=$?; ls /var/lib/fishbowl/logs | wc -l",
+                              FISHBOWL_AUTO_UPDATE=0, FISHBOWL_UPDATE_DELAY=0, STUB_CANDIDATES=GOOD)
+        expect(r.stdout.split() == ["rc=0", "0"] and calls == "", f"{r.stdout!r} {calls!r}")
+    check("FISHBOWL_AUTO_UPDATE=0: nothing runs", off_switch)
+
+    def at_start_quiet():
+        script = ("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh --at-start; echo rc=$?; "
+                  "echo ---; ls /var/lib/fishbowl/logs; grep -c 'Result: 1 package' /var/lib/fishbowl/logs/update-*.log")
+        r, calls = run_script(script, FISHBOWL_UPDATE_DELAY=0, STUB_CANDIDATES=GOOD)
+        out = r.stdout
+        expect("rc=0" in out and "update-" in out, out)
+        expect("System updates: 1 package(s) updated" in out.split("---")[0], "no one-line summary in the container log")
+        expect("Updated packages" not in out.split("---")[0] and "Upgrading" not in out.split("---")[0], "the details leaked into the container log")
+    check("update-all.sh at start: details go to a log file, one line to the container log", at_start_quiet)
+
+    def keeps_five():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; for i in 1 2 3 4 5 6 7; do update-all.sh --at-start >/dev/null 2>&1; sleep 1; done; ls /var/lib/fishbowl/logs/update-*.log | wc -l",
+                              FISHBOWL_UPDATE_DELAY=0, STUB_CANDIDATES=GOOD)
+        expect(r.stdout.strip() == "5", r.stdout + r.stderr)
+    check("update logs: the five newest are kept", keeps_five)
+
+    def stop_while_waiting():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh --at-start & p=$!; sleep 1; kill -TERM $p; s=$(date +%s); wait $p; echo rc=$? waited=$(( $(date +%s) - s ))",
+                              FISHBOWL_UPDATE_DELAY=300, STUB_CANDIDATES=GOOD)
+        m = re.search(r"rc=(\d+) waited=(\d+)", r.stdout)
+        expect(m and m.group(1) == "0" and int(m.group(2)) <= 3 and " upgrade" not in calls, r.stdout + calls)
+    check("stopping the container while an update is still waiting its turn ends it at once", stop_while_waiting)
+
+    def stop_during_dnf():
+        r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh --at-start >/dev/null 2>&1 & p=$!; sleep 2; kill -TERM $p; wait $p; echo rc=$?; grep -c 'Result: 1 package' /var/lib/fishbowl/logs/update-*.log",
+                              FISHBOWL_UPDATE_DELAY=0, STUB_CANDIDATES=GOOD, STUB_SLEEP=4)
+        expect("rc=0" in r.stdout and r.stdout.strip().endswith("1") and " upgrade" in calls, r.stdout + calls)
+    check("stopping the container while dnf works lets the package step finish first", stop_during_dnf)
+
+    def setup_waits():
+        script = ("mkdir -p /run/fishbowl; ( exec 9>/run/fishbowl/update.lock; flock 9; sleep 5 ) & sleep 1; s=$(date +%s); "
+                  "bash -c '. /usr/local/lib/fishbowl/common.sh; wait_for_system_update; echo got-lock' ; echo waited=$(( $(date +%s) - s ))")
+        r, calls = run_script(script)
+        m = re.search(r"waited=(\d+)", r.stdout)
+        expect("got-lock" in r.stdout and m and int(m.group(1)) >= 3, r.stdout + r.stderr)
+    check("a first-time setup or upgrade waits for a running system update", setup_waits)
+
+    # -- once for real, in a container that has just started
+    box = Box("fbcheck-u", image, a.port, a.password, a.work)
+    box.create_volumes()
+    box.run(env=["FISHBOWL_AUTO_UPDATE=1", "FISHBOWL_UPDATE_DELAY=3"])
+    try:
+        box.wait_state("needs-setup", 120)
+        started = sh("docker", "inspect", "-f", "{{.State.StartedAt}} {{.RestartCount}}", box.name).stdout.strip()
+
+        def real_update():
+            deadline = time.time() + 900
+            log = ""
+            while time.time() < deadline:
+                log = box.exec("bash", "-c", "cat /var/lib/fishbowl/logs/update-*.log 2>/dev/null").stdout
+                if "Result:" in log:
+                    break
+                time.sleep(5)
+            expect("Result:" in log, "the update never finished: " + log[-300:])
+            expect("Update run started" in log)
+            return log
+        log = {}
+        ok = check("a container that has just started updates itself in the background (real dnf)", lambda: log.update(text=real_update()) or True)
+        if ok:
+            text = log["text"]
+            result = re.search(r"Result: (.*)", text).group(1)
+            print(f"      (update result: {result})", flush=True)
+            check("the update did not restart the container or any program, and asked nothing",
+                  lambda: expect(sh("docker", "inspect", "-f", "{{.State.StartedAt}} {{.RestartCount}}", box.name).stdout.strip() == started
+                                 and box.state() == "needs-setup" and "[Y/n]" not in text and "reboot" not in text.lower()))
+            check("after the update MySQL 8.4 and Java 21 still pass the image's runtime check (mysqld starts under Docker's default capabilities)",
+                  lambda: expect(box.exec("bash", "/usr/local/lib/fishbowl/verify-runtime.sh").returncode == 0))
+            check("the update left no package cache behind", lambda: expect(
+                box.exec("bash", "-c", "du -sk /var/cache/libdnf5 /var/cache/dnf 2>/dev/null | awk '{s+=$1} END {print s+0}'").stdout.strip() in ("0", "") or
+                int(box.exec("bash", "-c", "du -sk /var/cache/libdnf5 /var/cache/dnf 2>/dev/null | awk '{s+=$1} END {print s+0}'").stdout.strip() or 0) < 20000))
+    finally:
+        box.remove()
+        sh("docker", "volume", "rm", "-f", *[f"fbcheck-u-{p}" for p in ("mysql", "app", "data")])
 
 
 # ---------------------------------------------------------------- reference --
@@ -616,7 +790,7 @@ def reference(a):
         g.replace_text(CHOOSER_FILE_NAME, "/var/lib/fishbowl/import/" + stored)
         g.click(CHOOSER_OPEN, pause=3)
         g.shot("ref-1-file-chosen")              # the database name is Fishbowl's own suggestion
-        g.replace_text(RESTORE_PASSWORD, pw)
+        # Password: left as Fishbowl filled it in, as the page says
         g.click(RESTORE_BUTTON, pause=3)
         g.shot("ref-2-confirm")
         g.click(RESTORE_YES)
@@ -838,7 +1012,7 @@ def upgrade(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("group", choices=["runtime", "upgrade", "reference"])
+    ap.add_argument("group", choices=["runtime", "update", "upgrade", "reference"])
     ap.add_argument("--image", required=True)
     ap.add_argument("--next", default="")
     ap.add_argument("--reference-sql", default="")
@@ -850,7 +1024,7 @@ def main():
     if a.group == "reference" and not os.path.isfile(a.reference_sql):
         sys.exit("--reference-sql FILE is needed for the reference checks")
     try:
-        {"runtime": runtime, "upgrade": upgrade, "reference": reference}[a.group](a)
+        {"runtime": runtime, "update": update, "upgrade": upgrade, "reference": reference}[a.group](a)
     except Exception as e:   # noqa: BLE001
         report(f"{a.group} checks ran to the end", False, f"{type(e).__name__}: {e}")
     sys.exit(1 if FAILED else 0)

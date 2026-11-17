@@ -127,9 +127,17 @@ rm -f "$RFB_SOCK" "$WS_SOCK" "/tmp/.X11-unix/X$DISPLAY_NUM" "/tmp/.X$DISPLAY_NUM
 
 # No VNC password and no TCP port: the VNC socket is readable by fishbowl only,
 # and the page's server checks the access code before it connects anyone.
+# Picture quality without wasted work:
+#   -depth 24      full colour (no banding in gradients or item pictures)
+#   -FrameRate=30  at most 30 screen updates a second per viewer; a business
+#                  window gains nothing from 60, and scrolling costs half the CPU
+#   nothing is drawn while nothing changes (CompareFB's default), and there is
+#   no GPU or OpenGL emulation, which would burn CPU for no visible gain.
+# The browser asks for a high JPEG quality for pictures (view.js); text and
+# flat colours are always sent exactly.
 spawn Xvnc ":$DISPLAY_NUM" -geometry "$GEOMETRY" -depth 24 -dpi 96 -desktop "$TITLE" \
   -SecurityTypes None -rfbunixpath "$RFB_SOCK" -rfbport -1 -nolisten tcp \
-  -AlwaysShared -AcceptSetDesktopSize=1 >>"$SESSION_LOG" 2>&1
+  -AlwaysShared -AcceptSetDesktopSize=1 -FrameRate=30 >>"$SESSION_LOG" 2>&1
 { wait_for_socket "/tmp/.X11-unix/X$DISPLAY_NUM" 15 && wait_for_socket "$RFB_SOCK" 15; } ||
   fail 1 "The virtual screen for $TITLE (Xvnc) did not start; see $SESSION_LOG"
 
@@ -140,7 +148,14 @@ wait_for_socket "$WS_SOCK" 20 ||
 
 eve_before="$(sha256sum < "$FB_EVE" 2>/dev/null || true)"
 cd "$(dirname "$LAUNCHER")"
-spawn "$LAUNCHER" >>"$SESSION_LOG" 2>&1
+# Java options for the window (JAVA_TOOL_OPTIONS reaches the program's own Java
+# without touching Fishbowl's launcher files, which its installer owns):
+#   useSystemAAFontSettings=on, swing.aatext=true   smooth (grey-scale) text; the
+#                  colour-fringed LCD style looks bad once the picture is JPEG-compressed
+#   G1PeriodicGCInterval=60000   while the window sits idle, Java hands unused
+#                  memory back to the container every minute instead of keeping it
+spawn env JAVA_TOOL_OPTIONS="-Dawt.useSystemAAFontSettings=on -Dswing.aatext=true -XX:G1PeriodicGCInterval=60000" \
+  "$LAUNCHER" >>"$SESSION_LOG" 2>&1
 APP_PID="${CHILD_PIDS[-1]}"
 cd /
 printf 'ready\n' > "$STATE"

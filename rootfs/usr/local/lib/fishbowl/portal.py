@@ -7,7 +7,7 @@ things:
   * shows what state the container is in and what it needs from you
   * takes first-time setup and upgrade answers (license agreement, license key
     or trial) and hands them to the entrypoint
-  * takes .sql backups into the import folder, for the Restore tab of Fishbowl
+  * takes files of any type into the import folder (.sql backups for the Restore tab of Fishbowl
     Server Administration
   * shows Server Administration and the Fishbowl Client in browser tabs (noVNC)
     by passing the browser's WebSocket through to that window's private socket
@@ -108,16 +108,6 @@ def installer_info():
 INSTALLER = installer_info()
 
 
-def root_password():
-    """The MySQL root password this image sets (one file, also read by the shell scripts)."""
-    try:
-        with open("/usr/local/lib/fishbowl/mysql-root-password.txt", encoding="utf-8") as f:
-            return f.readline().rstrip("\n")
-    except OSError:
-        return ""
-
-
-ROOT_PASSWORD = root_password()
 EULA_PATH = INSTALLER.get("FISHBOWL_EULA", "")
 
 
@@ -250,7 +240,7 @@ def list_imports():
                     continue
                 st = entry.stat(follow_symlinks=False)
                 files.append({"name": entry.name, "size": st.st_size, "modified": int(st.st_mtime),
-                              "made_by": made_by(entry.name, st)})
+                              "made_by": made_by(entry.name, st) if entry.name.lower().endswith(".sql") else "n/a"})
     except OSError:
         pass
     files.sort(key=lambda f: f["name"].lower())
@@ -279,11 +269,10 @@ def build_status():
         "upgrade_to": info.get("upgrade_to", ""),
         "upgrade_blocked": info.get("upgrade_blocked", ""),
         "volumes": info.get("volumes", "named"),
-        # "image": MySQL's root password is the one this image sets, shown to the signed-in
-        # page so it can be typed into Server Administration. "own": the installation was
-        # set up by an earlier version of this image with a password the person chose.
+        # "image": MySQL's root password is the one this image sets. "own": the installation
+        # was set up by an earlier version of this image with a password the person chose.
+        # The password itself is never sent to a browser: Fishbowl fills it in by itself.
         "root_password_kind": info.get("root_password", ""),
-        "mysql_root_password": ROOT_PASSWORD if info.get("root_password") == "image" else "",
         # answers handed over that the container has not picked up yet
         "requests": {name: os.path.exists(os.path.join(SPOOL, name)) for name in ("setup", "upgrade")},
         "pending_settings": os.path.exists(RUN + "/pending-settings"),
@@ -363,8 +352,8 @@ def clean_upload_name(raw):
     (Fishbowl's Restore tab suggests a database name from the file name)."""
     name = posixpath.basename(str(raw).replace("\\", "/"))
     name = re.sub(r"[^A-Za-z0-9.-]+", "_", name).lstrip("._")
-    if not name.lower().endswith(".sql") or len(name) <= 4:
-        raise Problem(400, "Only .sql files can be uploaded here (Fishbowl's Restore tab lists .sql files).")
+    if not name:
+        raise Problem(400, "That file needs a name.")
     if len(name) > 150:
         raise Problem(400, "That file name is too long; rename the file and try again.")
     return name

@@ -105,12 +105,15 @@ class Gui:
 
     # ---- the things a person does
     def create_database(self, name, mysql_password, table_count, timeout=900):
-        """Database tab -> + -> name and password -> Connect -> wizard (defaults) -> wait."""
+        """Database tab -> + -> name and password -> Connect -> wizard (defaults) -> wait.
+        mysql_password None: leave the Password field as Fishbowl filled it in (what the
+        page tells people to do; the image's password is never typed or shown)."""
         self.click(TAB_DATABASE)
         self.click(PLUS, pause=3)
         self.shot("create-1-form")
         self.replace_text(CONN_DATABASE, name)
-        self.replace_text(CONN_PASSWORD, mysql_password)
+        if mysql_password is not None:
+            self.replace_text(CONN_PASSWORD, mysql_password)
         self.click(CONN_CONNECT, pause=20)
         self.shot("create-2-settings")
         self.click(SETTINGS_OK)       # United States, Average Costing: fine for a throwaway test database
@@ -129,14 +132,16 @@ class Gui:
         return n
 
     def restore(self, path_in_container, database, mysql_password, table_count, timeout=1800):
-        """Restore tab -> choose the file -> database name and password -> Restore -> Yes -> wait -> OK."""
+        """Restore tab -> choose the file -> database name and password -> Restore -> Yes -> wait -> OK.
+        mysql_password None: leave the Password field as Fishbowl filled it in."""
         self.click(TAB_RESTORE, pause=2)
         self.click(RESTORE_MAGNIFIER, pause=3)
         self.shot("restore-1-chooser")
         self.replace_text(CHOOSER_FILE_NAME, path_in_container)
         self.click(CHOOSER_OPEN, pause=3)
         self.replace_text(RESTORE_DATABASE, database)
-        self.replace_text(RESTORE_PASSWORD, mysql_password)
+        if mysql_password is not None:
+            self.replace_text(RESTORE_PASSWORD, mysql_password)
         self.shot("restore-2-filled")
         self.click(RESTORE_BUTTON, pause=3)
         self.shot("restore-3-confirm")

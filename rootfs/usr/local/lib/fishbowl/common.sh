@@ -4,9 +4,10 @@
 #
 # Secrets rule for every script in this image: the License Key and any MySQL
 # root password someone types are read without echo, never passed on a command
-# line, never exported, never logged. (The image's own MySQL root password is
-# public by design: it sits in mysql-root-password.txt, and the Fishbowl page
-# shows it to the person who is signed in.) Temporary files that hold them live in /dev/shm
+# line, never exported, never logged. (The image's own MySQL root password is read from
+# mysql-root-password.txt only inside the container: it is never printed, logged, shown
+# on the Fishbowl page or sent to a browser. Fishbowl fills it into Server
+# Administration's Password fields by itself, masked.) Temporary files that hold them live in /dev/shm
 # (RAM), mode 0600, and are deleted as soon as they have been read.
 
 set -o errexit -o nounset -o pipefail
@@ -34,6 +35,7 @@ readonly IMPORT_DIR=/var/lib/fishbowl/import   # .sql files for the Restore tab 
 readonly PENDING_EVE=/var/lib/fishbowl/state/pending-eve.properties
 readonly INSTALLER_TMP=/var/lib/fishbowl/tmp
 readonly RUN_DIR=/run/fishbowl
+readonly UPDATE_LOCK="$RUN_DIR/update.lock"   # held while update-all.sh changes packages; setup and upgrades wait for it
 readonly STATUS_FILE=/run/fishbowl/status
 readonly MESSAGE_FILE=/run/fishbowl/message          # the longer text that goes with the status
 readonly INFO_FILE=/run/fishbowl/info                # facts for the page (versions, database name); nothing secret
@@ -135,6 +137,18 @@ default_root_password() {
   IFS= read -r pw < "$f" || [ -n "$pw" ] || true
   [ -n "$pw" ] || fail 1 "The MySQL root password file $f is empty."
   printf '%s' "$pw"
+}
+
+# A first-time setup or an upgrade must not run while update-all.sh is changing
+# packages (MySQL and Java are among them). Call this at the start of such a job;
+# the lock stays held (file descriptor 7) until the job's process ends.
+wait_for_system_update() {
+  mkdir -p "$RUN_DIR"
+  exec 7>"$UPDATE_LOCK" || return 0
+  if ! flock -n 7; then
+    log "A system update is running; waiting for it to finish before going on (a few minutes at most)"
+    flock -w 1800 7 || warn "The system update is taking very long; going on anyway."
+  fi
 }
 
 # --------------------------------------------------------- run commands -----

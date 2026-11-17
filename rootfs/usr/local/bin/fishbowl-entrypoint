@@ -38,6 +38,7 @@ esac
 START_PAUSED=0          # the `admin` command
 FB_LOG_OFFSET=0
 PORTAL_PID=""
+UPDATE_PID=""           # update-all.sh, started in the background at every start
 PORTAL_RESTARTS=0
 JOB_PID=""              # a setup or upgrade child in progress
 EXPECT_SETUP=0          # 1 while waiting for first-time setup answers
@@ -63,6 +64,7 @@ on_exit() {
   sessions_stop_all
   fishbowl_stop
   mysql_stop
+  system_update_stop
   portal_stop
   rm -rf "$WEB_SPOOL"   # requests nobody will read now (they may hold answers)
   set_status stopped
@@ -76,6 +78,38 @@ on_signal() {
     setup|upgrading) exit 143 ;;   # interrupted in the middle of an install or upgrade: not a success
     *) exit 0 ;;                   # a normal stop
   esac
+}
+
+# ------------------------------------------------------------ system updates --
+# update-all.sh updates the Fedora packages inside the container (MySQL, Java and
+# the rest) in the background at every start. It changes files only: nothing is
+# restarted, and what is already running keeps running until the container
+# starts again. FISHBOWL_AUTO_UPDATE=0 turns it off.
+system_update_start() {
+  [ "${FISHBOWL_AUTO_UPDATE:-1}" != 0 ] || return 0
+  [ -x "$BIN_DIR/update-all.sh" ] || return 0
+  # Its own session (so stopping it can reach dnf too), low priority, no input.
+  setsid "$BIN_DIR/update-all.sh" --at-start </dev/null &
+  UPDATE_PID=$!
+}
+# Stopping the container: let a package that is half-installed finish, but not
+# for long (Docker gives the container 10 seconds unless it was started with
+# --stop-timeout, as the README's command does).
+system_update_stop() {
+  [ -n "$UPDATE_PID" ] || return 0
+  if kill -0 "$UPDATE_PID" 2>/dev/null; then
+    kill -TERM "$UPDATE_PID" 2>/dev/null || true
+    for _ in $(seq 1 60); do
+      kill -0 "$UPDATE_PID" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$UPDATE_PID" 2>/dev/null; then
+      warn "A system update did not finish in time and was stopped."
+      kill -KILL -- "-$UPDATE_PID" 2>/dev/null || kill -KILL "$UPDATE_PID" 2>/dev/null || true
+    fi
+  fi
+  wait "$UPDATE_PID" 2>/dev/null || true
+  UPDATE_PID=""
 }
 
 # ---------------------------------------------------------------- the page --
@@ -369,6 +403,7 @@ cmd_setup_job() {  # internal: first-time setup from an answers file
   FAIL_NOTE_FILE="$LAST_ERROR_FILE"
   trap job_exit EXIT
   trap 'exit 143' TERM INT HUP
+  wait_for_system_update
   read_answers "${1:-}" setup
   record_eula_acceptance "$FISHBOWL_VERSION" "$ANSWER_METHOD"
   log "License agreement for Fishbowl $FISHBOWL_VERSION accepted: $ANSWER_METHOD"
@@ -427,6 +462,7 @@ cmd_upgrade_job() {  # internal: the upgrade itself, from an answers file; MySQL
   FAIL_NOTE_FILE="$LAST_ERROR_FILE"
   trap job_exit EXIT
   trap 'exit 143' TERM INT HUP
+  wait_for_system_update
   read_answers "${1:-}" upgrade
   record_eula_acceptance "$FISHBOWL_VERSION" "$ANSWER_METHOD"
   log "License agreement for Fishbowl $FISHBOWL_VERSION accepted: $ANSWER_METHOD"
@@ -803,6 +839,7 @@ cmd_run() {
   publish_info
   portal_start
   print_page_link
+  system_update_start   # in the background; waits its turn behind setup and upgrades
 
   case "$(detect_state)" in
     # Settings changed in Server Administration (a purchased license, say) count

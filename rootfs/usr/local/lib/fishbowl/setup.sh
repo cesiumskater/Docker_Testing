@@ -58,14 +58,14 @@ collect_answers() {
   hr
   note " Fishbowl Advanced $FISHBOWL_APP_VERSION - first-time setup"
   hr
-  note "Setup asks four things, then installs on its own:"
+  note "Setup asks three things, then installs on its own:"
   note "  1. Accept Fishbowl's license agreement"
   note "  2. Your Fishbowl license key, or the 14 Day Trial"
   note "  3. Your company name (licensed installs only; trials register as \"Trial\")"
-  note "  4. A password for MySQL's root user"
   note ""
   note "Set automatically: Server with Client install in /opt/Fishbowl, MySQL 8.4 on"
-  note "localhost:3306, server memory ${SERVER_MEMORY_MB} MB, client memory ${CLIENT_MEMORY_MB} MB."
+  note "localhost:3306, server memory ${SERVER_MEMORY_MB} MB, client memory ${CLIENT_MEMORY_MB} MB,"
+  note "and MySQL's root password (this image sets it; it is never shown)."
   note ""
 
   # 1. EULA -------------------------------------------------------------------
@@ -142,7 +142,7 @@ collect_answers() {
     note "  License:       key ending in ...${SETUP_KEY: -4}"
     note "  Company name:  $SETUP_COMPANY"
   fi
-  note "  MySQL root:    the password this image sets (shown on the Fishbowl page)"
+  note "  MySQL root:    set by this image (not shown anywhere)"
   hr
 }
 

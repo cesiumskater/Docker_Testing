@@ -412,8 +412,8 @@ form. Nothing is accepted or installed until you submit it.
    it appears on your license, or **Start the 14 Day Fishbowl Trial** (Fishbowl
    registers a trial under the name "Trial").
 3. **Nothing else.** There's no MySQL password to choose: the image sets one
-   itself (see [The MySQL root password](#the-mysql-root-password) below). The
-   page shows it in the steps where Server Administration asks for it.
+   itself (see [The MySQL root password](#the-mysql-root-password) below). It's
+   never shown: Server Administration's Password fields come filled in with it.
 
 Then **Install Fishbowl**. The container initializes MySQL, sets its root password,
 checks that MySQL is 8.4.x with `lower_case_table_names = 1`, applies the
@@ -429,7 +429,7 @@ tuning from its `server/bin/my.cnf`, and Fishbowl's Auto Updates set to *Never*
 (new versions come from new images, see [section 12](#12-updating-to-a-new-fishbowl-version)).
 
 **Prefer a terminal?** `docker exec -it fishbowl fishbowl-setup` asks the same
-four things (the agreement opens in a pager and only a typed `yes` accepts it),
+three things (the agreement opens in a pager and only a typed `yes` accepts it),
 then hands the answers to the container the same way the page does. It works the
 same in PowerShell.
 
@@ -457,7 +457,7 @@ Fishbowl's own backups are `.sql` files named like
 `MyCompany_2026-11-15-15-42.sql`, made with **Backup Database** in Server
 Administration or by the Client's Schedule module.
 
-1. **Upload it** in the **Backups to restore (.sql)** box on the page. It lands
+1. **Upload it** in the **Files and backups to restore** box on the page. Any file type can be uploaded, not only `.sql` (the page lists everything in the import folder and reads the Fishbowl version only from `.sql` files). It lands
    in the container's **import** folder, and the page shows which Fishbowl
    version made it (read from the file's `databaseversion` table). Larger files
    simply take longer. Copying one in works too, for example from your
@@ -485,8 +485,10 @@ Administration or by the Client's Schedule module.
    name** restores the backup next to anything that's already there, which is
    the safe choice. An **existing name** replaces that database: Fishbowl warns
    that all data not in the backup will be lost.
-5. **Password:** clear the pre-filled value and type the MySQL root password
-   (the page shows it in this step). Host `localhost`, Port `3306` and Username `root` stay as they are.
+5. **Password:** leave it as it is. Fishbowl fills it in, masked, and
+   it's already the right one, so you never see or type it. (Cleared it by mistake? Close
+   Server Administration and open it again from the page, and Fishbowl fills it in
+   again.) Host `localhost`, Port `3306` and Username `root` stay as they are.
 6. Click **Restore**, confirm with **Yes**, and wait for **"Database has been
    restored."** (a 54 MB backup took 44 seconds in testing). Click **OK**.
 7. Go to the **Database** tab. The restore has already added the database to
@@ -533,8 +535,9 @@ use the `restore` command for those ([section 11](#11-backups-and-your-data)).
    **+** on the right.
 2. **Database:** a name for your company database (letters, numbers and
    underscores). Host `localhost`, Port `3306`, Username `root`.
-3. **Password:** clear the long pre-filled value first, then type the MySQL
-   root password (the page shows it in this step). Click **Connect**.
+3. **Password:** leave it as it is. Fishbowl fills it in, masked, and
+   it's already the right one, so you never see or type it. (Cleared it by mistake? Click
+   **Cancel** and **+** again, and Fishbowl fills it in again.) Click **Connect**.
 4. Fishbowl asks for your **country** and **costing method** (Average,
    Standard, FIFO or LIFO costing). Fishbowl warns that *this setting cannot be
    changed once the wizard is complete.* Click **OK** and wait while Fishbowl
@@ -662,6 +665,37 @@ here:
   sudo firewall-cmd --permanent --add-port=2456/tcp
   sudo firewall-cmd --reload
   ```
+
+### Picture quality, and what it costs
+
+The windows are drawn by a virtual screen (TigerVNC's Xvnc) inside the container
+and sent to your browser, so the settings trade picture quality against CPU and
+memory in the container. What this image does:
+
+- **Full colour (24-bit)**, and text drawn with grey-scale smoothing. The
+  Fishbowl windows start Java with `-Dawt.useSystemAAFontSettings=on` and
+  `-Dswing.aatext=true`. Colour-fringed (LCD) text looks worse once the picture
+  is compressed, so it isn't used.
+- **High picture quality in the browser.** The viewer asks for JPEG quality 8 of
+  9 (noVNC's own default is 6) for pictures such as item photos; text and flat
+  colours are always sent exactly. Compression stays light (level 2), which is
+  cheap for the container's CPU.
+- **At most 30 screen updates a second** per viewer (the virtual screen's default
+  is 60). Nothing is sent while nothing changes, and no GPU or OpenGL emulation
+  runs, because without a graphics card that would burn CPU for no visible gain.
+- **Memory goes back.** While a window sits idle, its Java hands unused memory
+  back to the container every minute (`-XX:G1PeriodicGCInterval=60000`). This
+  applies to the Server Administration and Client windows only. Fishbowl Server
+  itself is not touched.
+- **The window follows the size of its browser tab**, up to 3840 x 2160, and the
+  virtual screen only exists while the window is open.
+
+What it doesn't do: the picture is drawn at one pixel per CSS pixel, so on a
+display with Windows or macOS scaling above 100% the browser enlarges it and it
+can look a little soft. A crisper picture there needs the window drawn at the
+display's real resolution, with Java's own scaling turned up to match, and noVNC
+has no setting for that. This hasn't been attempted, because it needs a
+high-resolution screen to test on.
 
 ## 10. Day-to-day use
 
@@ -886,6 +920,61 @@ Downgrades are refused, so it's the way back if the new version doesn't work out
 - If Fishbowl Server reports that it can't update the database, the page shows
   Fishbowl's reason ([Troubleshooting](#16-troubleshooting)).
 
+### Updates to the system inside the container (MySQL, Java and the rest)
+
+Separate from Fishbowl's own versions above. **Every time the container starts,
+it updates its own Fedora packages in the background**: the operating system
+libraries, MySQL 8.4, Java 21 (Eclipse Temurin) and the pieces behind the browser
+windows. This is `update-all.sh`, a container edition of the update script it
+was modeled on.
+
+- **It never restarts anything and never asks.** It starts 90 seconds after the
+  container does (after MySQL and Fishbowl Server have had their turn), at low
+  priority, and only replaces files. Programs that are already running keep
+  using the old ones; the new ones are used the next time the container starts
+  (`docker restart fishbowl`, or whenever Docker starts it). Nothing on the page
+  or in the log asks you to restart.
+- **It's quiet.** The details are in `/var/lib/fishbowl/logs/update-*.log` (the
+  five newest are kept). The container's own log gets one line, and only when
+  packages changed or something went wrong.
+- **It gets out of the way.** A first-time setup or a Fishbowl upgrade that
+  starts while an update is running waits for it to finish (a few minutes at
+  most), and an update that comes due while one of those runs waits for it.
+  Stopping the container ends an update that is still waiting at once, and lets
+  a package that is being installed finish first.
+- **It keeps Fishbowl's requirements.** An update that would move MySQL off 8.4
+  or Java off 21 is left out and the rest still updates. After an update it puts
+  back the change to `mysqld` that the image makes at build time (a newer MySQL
+  package undoes it, and `mysqld` then refuses to start under Docker's default
+  settings) and runs the same MySQL 8.4 / Java 21 / browser-window check as the
+  image build. If that check fails, the log says so and the container's log gets
+  a warning. Recreate the container from the image to get back to the tested
+  versions; your data is in the volumes and isn't affected.
+- **It doesn't upgrade Fishbowl.** A new Fishbowl version needs someone to accept
+  its license agreement, so that stays on the page (or `fishbowl-upgrade`).
+  It doesn't touch your computer either: the Docker host's own updates are yours
+  to run.
+- **It needs a network connection from inside the container** to Fedora's package
+  servers and to `packages.adoptium.net`. Without one it says so in the log,
+  changes nothing and tries again at the next start. Packages are checked with
+  the repositories' signatures (`gpgcheck=1`).
+- **Updates live in the container, not in a volume.** They survive
+  `docker restart`, but a container that is removed and created again (a new
+  image, `docker compose up --force-recreate`) starts from the image's package
+  versions and updates again 90 seconds later. Rebuild the image now and then
+  and the image carries the newer versions.
+- **To turn it off:** start the container with `-e FISHBOWL_AUTO_UPDATE=0` (or
+  `environment:` in `compose.yaml`). **To run it by hand:**
+  `docker exec fishbowl update-all.sh` (it prints what it does; the changes are
+  used from the next container start, as always).
+
+A MySQL update is a patch release inside 8.4, which MySQL installs over an
+existing data directory by itself the next time it starts. **Take a backup
+(`fishbowl-backup`) before you restart after MySQL was updated**, as you would
+before any MySQL update. I tested this once by hand: a data directory made by
+8.4.10 started on 8.4.13 after the update, upgraded itself, and kept its data
+(see section 17).
+
 ## 13. Security
 
 - **The page is the only way in** to the setup form, the browser windows and the
@@ -894,8 +983,7 @@ Downgrades are refused, so it's the way back if the new version doesn't work out
   refused, and after ten in a minute the page stops accepting codes for a minute.
 - **Port 6080 is published on 127.0.0.1 only**, so the page works on the
   computer that runs Docker and nowhere else. It's plain HTTP: if you publish it
-  on the network (`-p 6080:6080`), the access code, the MySQL root password the
-  page shows and everything you type in the windows travel unencrypted, and the page says
+  on the network (`-p 6080:6080`), the access code and everything you type in the windows travel unencrypted, and the page says
   so at the top. To use it from another computer, an SSH tunnel keeps it
   private: `ssh -L 6080:localhost:6080 you@docker-host`, then open
   `http://localhost:6080/` there. The `ssh` command comes with Linux, macOS and
@@ -909,26 +997,30 @@ Downgrades are refused, so it's the way back if the new version doesn't work out
   Client run as `fishbowl`, MySQL as `mysql`. Neither is root.
 - **Your license key** goes from the form to the container through memory
   (`/dev/shm`, owner-only, deleted as soon as it's read) and never appears in the
-  logs. The MySQL root password is the image's own (next section), so it can't
-  be a secret from anyone who has the repository; the checks in `tests/` make sure
+  logs. The MySQL root password is never shown on the page, in its data or in the logs
+  (next section); the checks in `tests/` make sure
   it isn't written to the logs or into the volumes.
 - MySQL listens on 127.0.0.1 inside the container only.
 
 ### The MySQL root password
 
 Nobody chooses one: every new installation gets the same MySQL root password,
-which is in `rootfs/usr/local/lib/fishbowl/mysql-root-password.txt`:
+which is in `rootfs/usr/local/lib/fishbowl/mysql-root-password.txt`. It is
+secret information, so this image never shows it: not on the Fishbowl page, not
+in the page's data (`/api/status`), not in the logs, not in this README, and not
+in the messages `fishbowl-setup` prints. It never goes to your browser either.
 
-```
-HdI^DtY1$3HoUzCYjiric9%B0k!r5=CG
-```
+You don't need it anyway. Setup doesn't hand Fishbowl's installer a database
+password, so the installer stores its own default, and that default is this same
+string. So Server Administration's Password fields (the **+** dialog and the
+**Restore** tab) come filled in with the right password, masked with dots. Leave
+them as they are. I tested this: a new database and a restore both worked with
+the field untouched. If you clear one by mistake, **Cancel** and **+** brings it
+back in the new-database dialog, and closing and reopening Server Administration
+brings it back on the Restore tab.
 
-The Fishbowl page shows it in the Server Administration steps, and its clipboard
-box can hold it so you can paste it into the Fishbowl window. To use it yourself:
-`docker exec -it fishbowl mysql -u root -p`.
-
-**Think about who can read this repository.** If it's public, so is the password,
-so treat it as a default, not a secret. In the one installation I looked at, the
+**Think about who can read this repository.** The password sits in a file in the
+repository (at your request), so if the repository is public, so is the password. In the one installation I looked at, the
 same string appears in Fishbowl's own installer settings (as `mysql8Password`,
 in `/opt/Fishbowl/.install4j/i4jparams.conf`), which suggests it is Fishbowl's
 default and not something new; I haven't confirmed that with Fishbowl. It also
@@ -944,7 +1036,10 @@ Not verified: that second step. Try it on a copy first.
 
 Installations made by an earlier version of this image kept the password their
 owner chose. The page and the terminal commands notice that (the image's
-password is turned down) and ask for it; nothing changes it for you.
+password is turned down) and ask for it; nothing changes it for you. On those,
+the page's steps say to clear Server Administration's Password field and type
+your own password, because the pre-filled value is Fishbowl's default and not
+yours (I haven't run that path in a GUI test).
 
 ## 14. Maintaining this repository
 
@@ -1071,7 +1166,11 @@ checks use, Fishbowl's refusal to be shown with the database left unchanged.
 The file is only read, and stays out of the repository. The checks accept
 Fishbowl's license agreement on your behalf in throwaway trial installations;
 run them only if that's acceptable to you. About 15 GB of free disk and 35
-minutes. `bash tests/run-checks.sh --help` lists the options.
+minutes. `--only update` runs just the system-update checks: update-all.sh against a
+stand-in dnf (what it leaves out, how it ends, how it behaves when the container
+stops), then once for real with dnf in a fresh container, which needs network
+access to the Fedora repositories. `bash tests/run-checks.sh --help` lists the
+options.
 
 ## 15. Reference
 
@@ -1099,6 +1198,7 @@ The same on Linux, macOS and Windows.
 | `docker exec -it fishbowl fishbowl-upgrade` | An upgrade at a terminal instead of the page. |
 | `docker exec fishbowl fishbowl-admin` | Opens Server Administration and prints its link. |
 | `docker exec -it fishbowl fishbowl-backup` | Back up all of MySQL. |
+| `docker exec fishbowl update-all.sh` | Update the container's Fedora packages now (also runs by itself at every start). Applies from the next start. |
 | `docker run -it --rm --platform linux/amd64 <the three -v> fishbowl restore FILE` | Restore a `fishbowl-backup` file (container stopped). |
 | `docker run --platform linux/amd64 … fishbowl admin` | Like the normal start, but Fishbowl Server stays stopped until you press Start on the page. |
 | `docker run --rm --platform linux/amd64 fishbowl version` | The image's Fishbowl version, for tagging (`2026.10`). |
@@ -1111,6 +1211,9 @@ The same on Linux, macOS and Windows.
 | `TZ` | `UTC` | Time zone for Fishbowl and MySQL, as a tz database name, e.g. `America/Denver`. |
 | `FISHBOWL_PROMPT_TIMEOUT` | `1800` | Seconds each question of `fishbowl-setup` / `fishbowl-upgrade` waits before giving up. |
 | `FISHBOWL_ALLOW_TRIAL_UPGRADE` | `0` | `1` offers the upgrade to a trial installation. Fishbowl Server refuses to update a trial's database, so this only works when the new version doesn't change the database; the test suite uses it. |
+| `FISHBOWL_AUTO_UPDATE` | `1` | `0` turns off the update of the container's Fedora packages at each start (see section 12). |
+| `FISHBOWL_UPDATE_DELAY` | `90` | Seconds after the container starts before the update begins. |
+| `FISHBOWL_UPDATE_TIMEOUT` | `1800` | Seconds before an update is given up on. |
 | `FISHBOWL_ALLOW_NO_VOLUMES` | `0` | `1` skips the check that the three data paths are volumes (throwaway tests only). |
 
 ### Exit codes
@@ -1130,9 +1233,9 @@ using the same volumes. `fishbowl-setup`, `fishbowl-upgrade` and
 | `/opt/Fishbowl/logs/fbserver.log` | Fishbowl Server's log. |
 | `/opt/Fishbowl/data/backups/` | Backups made with Backup Database in Server Administration. |
 | `/opt/Fishbowl/server/bin/*.vmoptions` | Server memory (`-Xmx…`); client memory is in `client/bin/`. |
-| `/var/lib/fishbowl/import/` | `.sql` files for the Restore tab (uploaded on the page or copied in); shown as `import` in Server Administration's file chooser. |
+| `/var/lib/fishbowl/import/` | Files of any type, mainly `.sql` backups for the Restore tab (uploaded on the page or copied in); shown as `import` in Server Administration's file chooser. |
 | `/var/lib/fishbowl/backups/` | `fishbowl-backup` and pre-upgrade backups. |
-| `/var/lib/fishbowl/logs/` | `mysqld.log`, setup and upgrade logs, and `session-admin.log` / `session-client.log` (the browser windows). |
+| `/var/lib/fishbowl/logs/` | `mysqld.log`, setup and upgrade logs, `update-*.log` (system updates), and `session-admin.log` / `session-client.log` (the browser windows). |
 | `/var/lib/fishbowl/state/` | Setup and upgrade state, license-agreement records, the page's access code, settings waiting for a restart. |
 | `/etc/my.cnf.d/90-fishbowl.cnf` | The guide's MySQL settings (in the image). |
 | `/etc/my.cnf.d/50-fishbowl-server.cnf` | Fishbowl's `server/bin/my.cnf` tuning (`max_connections`, `innodb_buffer_pool_size`, `max_allowed_packet`, …), regenerated whenever MySQL starts, minus the two settings the guide controls. |
@@ -1256,7 +1359,7 @@ data, so recreating it costs nothing:
 | An upload fails with "Not enough free disk space in Docker" | The same: free disk, then upload again. |
 | Server Administration's tab shows a closed window right away | Server Administration was closed (OK or Cancel) or failed to start; `docker exec fishbowl tail /var/lib/fishbowl/logs/session-admin.log`. Press **Open it again**. |
 | Changes made in Server Administration didn't take effect | Press **Restart Fishbowl Server** on the page. The log should show `Applied the settings changed in Server Administration`. |
-| The Restore tab doesn't list the file | It lists `.sql` files only: unzip a zipped backup first. Uploaded or copied files are in the `import` folder; type the full path in File Name if needed: `/var/lib/fishbowl/import/<file>.sql`. |
+| The Restore tab doesn't list the file | The Restore tab lists `.sql` files only: unzip a zipped backup first. Other file types you uploaded are in the same `import` folder for Fishbowl's other file choosers. Uploaded or copied files are in the `import` folder; type the full path in File Name if needed: `/var/lib/fishbowl/import/<file>.sql`. |
 | "Another container is already using these volumes" (exit 6) | Stop the other container first; two MySQL servers on one data directory would corrupt it. |
 | "This container has no named volumes" | See [First-time setup](#6-first-time-setup). The log prints the commands to fix it. |
 | The container keeps restarting with exit code 137 under load | Usually out of memory (`docker inspect -f '{{.State.OOMKilled}}' fishbowl` says `true`, on every system): give Docker more memory ([section 2](#how-much-memory-docker-gets)). |
@@ -1308,6 +1411,8 @@ repeats the checks marked *(suite)*.
 | Server Administration in its browser window: create a database, Restore tab with the uploaded file, select a database, the OK dialogs; Fishbowl Server starts by itself | Verified in Chromium through the page, and over VNC *(suite)* |
 | The Fishbowl Client in its browser window: opens connected to Fishbowl Server, fills and follows the tab, force close and reopen | Verified in Chromium; opening it *(suite)*. Working in the Client beyond its first-time wizard wasn't tested. |
 | Pasting into a Fishbowl window through the clipboard box | Verified in Chromium |
+| The MySQL password is never in the page's status data, its pages or its scripts; Server Administration's pre-filled Password field is right as it is: a new database, a restore, and the 54 MB reference restore all worked with the field untouched | Verified *(suite)* |
+| A cleared Password field comes back: **Cancel** and **+** in the new-database dialog; closing and reopening Server Administration on the Restore tab | Verified once by hand (screenshots), not in the suite |
 | **Restoring a real Fishbowl backup** (54 MB, made by Fishbowl 2026.7: 320 tables, 48 views, 423,215 rows) through the page and the Restore tab | Verified: the restored database is identical to a direct load of the file, table by table; Fishbowl suggested the name from the file name; the restore added it to the Database tab *(suite with `--reference-sql`)* |
 | Selecting that 2026.7 database on a trial installation | Fishbowl Server refused ("Trial accounts do not have access to update the database"); the page showed it within seconds, the container stayed up, the database was unchanged, Server Administration still opened *(suite with `--reference-sql`)* |
 | A backup made by the same Fishbowl version: upload, restore into a new database, select it, Restart on the page → runs on it | Verified *(suite)* |
@@ -1318,9 +1423,12 @@ repeats the checks marked *(suite)*.
 | Docker restarted (the test machine rebooted three times): the container came back to running by itself with `--restart always` | Observed |
 | Recreating the container on the same volumes: no questions, same data; a second container on the same volumes refused | Verified *(suite)* |
 | After setup: MySQL 8.4.10, `lower_case_table_names = 1`, heap 8192 MB, client 2048 MB, non-root processes, *healthy* | Verified *(suite)* |
-| License key and the MySQL password absent from `docker logs`; the password not written into the volumes; the page shows it to the signed-in person | Verified *(suite)* |
+| License key and the MySQL password absent from `docker logs`; the password not written into the volumes | Verified *(suite)* |
 | Upgrade on the page (a stand-in newer version): offered, not without acceptance, a wrong password given on the page caught early, backup, upgrade, data and memory kept; an interrupted upgrade is finished before Fishbowl starts; downgrade refused; a trial isn't offered the upgrade | Verified *(suite)* |
 | `fishbowl-upgrade` at a terminal | Verified once |
+| The automatic update (`update-all.sh`): runs once in the background after the start delay, never restarts anything or asks, changes only files, skips MySQL and Java versions outside 8.4 and 21, stays off with `FISHBOWL_AUTO_UPDATE=0`, fails clearly when offline, keeps a few logs, waits for setup and upgrade jobs, and a real update of MySQL 8.4.10 to 8.4.13 still passes the runtime check | Verified *(suite: stand-in `dnf` tests, plus one real update)* |
+| A MySQL data directory made by 8.4.10 started on 8.4.13 after the update: data kept, server upgrade completed | Verified once by hand, not in the suite |
+| Picture settings (30 frames a second, higher noVNC quality, smoother text in Java, idle memory returned) | The windows still open and work in the suite. I didn't measure CPU or memory before and after, and I didn't compare screenshots on a high-resolution screen. |
 | `fishbowl-backup`, the `restore` command | Verified *(suite)* |
 | The commands in this README for each system: Linux and macOS blocks run in bash and pasted into an interactive zsh 5.9 with its default options; Windows blocks parsed and run in PowerShell 7 (on Linux), each against a stand-in `docker` that records its arguments; `--platform linux/amd64` and `compose.yaml` checked against Docker Engine 29.9.3 | Checked that way. Not run on a Mac, on Windows, or in Windows PowerShell 5.1. |
 | Docker Desktop on Windows 11 | The build from GitHub completed in the maintainer's own run. Starting the container there isn't confirmed yet. |

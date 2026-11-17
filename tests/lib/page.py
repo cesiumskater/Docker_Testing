@@ -58,6 +58,13 @@ class Page:
             raise PageError(status, data.get("error", str(data)))
         return data
 
+    def get_text(self, path):
+        """The body of a page or file as text (for checking what the page serves)."""
+        status, _, raw = self.request("GET", path)
+        if status != 200:
+            raise PageError(status, path)
+        return raw.decode("utf-8", errors="replace")
+
     # ---- signing in
     def sign_in(self, code):
         """Open the link with the access code; True when the page let us in."""
