@@ -1,3 +1,0 @@
-# Keep Linux line endings (LF) in every checkout, Windows included. The scripts
-# here run inside Linux, and Windows line endings (CRLF) would break them.
-* text=auto eol=lf
