@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fishbowl in Docker</title>
+<link rel="icon" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <h1>Fishbowl in Docker</h1>
+  <span class="pill" id="pill-version" hidden></span>
+  <span class="pill" id="pill-license" hidden></span>
+  <span class="grow"></span>
+  <form method="post" action="/logout"><button type="submit" title="Sign this browser out of the page">Sign out</button></form>
+</header>
+
+<main class="page">
+
+  <section class="card bad" id="offline" hidden>
+    <h2>Can't reach the container</h2>
+    <p>The page lost its connection. If the container is stopped or restarting, this page picks up again by itself once it's back (<code>docker ps</code> shows whether it's running).</p>
+  </section>
+
+  <section class="card warn" id="net-warning" hidden>
+    <h2>You're using this page over the network</h2>
+    <p>This connection isn't encrypted, so the access code and anything you type in the Fishbowl windows could be read by others on the network. The safe way is to open the page on the computer that runs Docker, at <code>http://localhost:6080/</code>, and publish the port as <code>127.0.0.1:6080:6080</code>.</p>
+  </section>
+
+  <section class="card warn" id="image-age-warning" hidden>
+    <h2>This image hasn't been updated for <span id="image-age-days"></span> days</h2>
+    <p>Its system packages (MySQL, Java and the rest) were brought up to date on <span id="image-built"></span>. Security fixes only arrive with a rebuild, so the weekly maintenance should have rebuilt it by now. Check that the scheduled task still runs, or run it once by hand: README section 12, "Updates to the system inside the container".</p>
+  </section>
+
+  <section class="card warn" id="volumes-warning" hidden>
+    <h2>This container has no named volumes</h2>
+    <p>Docker gave it unnamed volumes. Fishbowl works on them, but they belong to this one container: a new container won't find them by itself, and removing this container together with its volumes deletes your Fishbowl install and database.</p>
+    <p>The container's log (<code>docker logs</code>) has the two commands that fix this: one to start over with named volumes, one to keep the data you already have here.</p>
+  </section>
+
+  <!-- what is going on right now -->
+  <section class="card" id="status-card">
+    <div class="status">
+      <span class="dot" id="status-dot"></span>
+      <div>
+        <h2 id="status-title">Starting up…</h2>
+        <p id="status-text" class="muted"></p>
+      </div>
+    </div>
+    <pre id="status-message" hidden></pre>
+    <div class="actions" id="actions" hidden>
+      <a class="button primary" id="open-client" href="/client" target="_blank" rel="noopener" hidden>Open Fishbowl Client</a>
+      <a class="button" id="open-admin" href="/admin" target="_blank" rel="noopener" hidden>Open Server Administration</a>
+      <button type="button" id="server-start" class="primary" hidden>Start Fishbowl Server</button>
+      <button type="button" id="server-restart" class="danger" data-confirm="Click again to restart (disconnects Fishbowl Clients)" hidden>Restart Fishbowl Server</button>
+      <button type="button" id="server-stop" class="danger" data-confirm="Click again to stop (disconnects Fishbowl Clients)" hidden>Stop Fishbowl Server</button>
+    </div>
+    <p id="action-error" class="error" hidden></p>
+  </section>
+
+  <section class="card warn" id="pending-card" hidden>
+    <h2>Changed settings are waiting for a restart</h2>
+    <p>Settings were changed in Server Administration while Fishbowl Server was running. They take effect when Fishbowl Server restarts, which disconnects Fishbowl Clients for a moment. <span id="pending-db"></span></p>
+    <div class="actions"><button type="button" id="pending-restart" class="danger" data-confirm="Click again to restart (disconnects Fishbowl Clients)">Restart Fishbowl Server now</button></div>
+  </section>
+
+  <section class="card bad" id="error-card" hidden>
+    <h2 id="error-title">That didn't work</h2>
+    <p id="error-text"></p>
+  </section>
+
+  <!-- first-time setup -->
+  <section class="card" id="setup-card" hidden>
+    <h2>First-time setup</h2>
+    <p>Two things, then Fishbowl installs on its own (a minute or two): the license agreement and your license. Nothing is accepted or installed until you press the button at the bottom.</p>
+    <form id="setup-form" autocomplete="off">
+      <fieldset>
+        <legend>1. Fishbowl's license agreement</legend>
+        <p class="hint">This is the text Fishbowl's own installer shows. Please read it.</p>
+        <div class="eula" id="setup-eula" tabindex="0">Loading the license agreement…</div>
+        <p class="hint" id="setup-eula-variants" hidden></p>
+        <label class="check"><input type="checkbox" id="setup-accept"> <span>I have read and accept Fishbowl's license agreement.</span></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>2. Your Fishbowl license</legend>
+        <label class="radio"><input type="radio" name="license" value="key" checked> <span>I have a Fishbowl license key</span></label>
+        <div id="setup-key-fields">
+          <label for="setup-key">License key</label>
+          <div class="row">
+            <input type="password" id="setup-key" autocomplete="off" spellcheck="false">
+            <button type="button" class="reveal" data-for="setup-key">Show</button>
+          </div>
+          <label for="setup-company">Company name</label>
+          <input type="text" id="setup-company" autocomplete="off" maxlength="200">
+          <p class="hint">Exactly as it appears on your Fishbowl license.</p>
+        </div>
+        <label class="radio"><input type="radio" name="license" value="trial"> <span>Start the 14 Day Fishbowl Trial</span></label>
+      </fieldset>
+
+      <fieldset>
+        <legend>3. MySQL root password</legend>
+        <p class="hint">Nothing to choose. This image sets MySQL's root password itself, and it is never shown. When you create or restore a database, Fishbowl fills the Password field in for you.</p>
+      </fieldset>
+
+      <fieldset id="setup-volumes" hidden>
+        <legend>Before you install</legend>
+        <label class="check"><input type="checkbox" id="setup-volumes-ok"> <span>I understand this container has no named volumes (see the note at the top) and want to install here anyway.</span></label>
+      </fieldset>
+
+      <p class="hint">Set automatically: Server with Client install, MySQL 8.4 on localhost:3306, server memory 8192 MB, client memory 2048 MB.</p>
+      <p id="setup-error" class="error" hidden></p>
+      <div class="actions"><button type="submit" class="primary" id="setup-submit">Install Fishbowl</button></div>
+    </form>
+  </section>
+
+  <!-- the company database -->
+  <section class="card" id="database-card" hidden>
+    <h2>Your company database</h2>
+    <p>Fishbowl is installed. Fishbowl Server starts by itself as soon as a company database is selected, and that happens in <strong>Fishbowl Server Administration</strong>, which opens in its own browser tab. Do you have a Fishbowl backup (a <code>.sql</code> file) to restore?</p>
+    <div class="cols">
+      <section>
+        <h3>Yes: restore a backup</h3>
+        <p class="hint" id="trial-restore-note" hidden></p>
+        <ol>
+          <li>Upload the <code>.sql</code> file in the box below.</li>
+          <li><a href="/admin" target="_blank" rel="noopener">Open Server Administration</a> and go to the <strong>Restore</strong> tab.</li>
+          <li>Click the magnifier next to <strong>Restore File</strong>, double-click the <strong>import</strong> folder, pick your file and click <strong>Open</strong>.</li>
+          <li><strong>Database:</strong> Fishbowl fills in a name from the file name. Check it, or type the name you want (letters, numbers and underscores).</li>
+          <li><strong>Password:</strong> <span class="pw-image">leave it as it is. Fishbowl fills it in, and that's already the right one (it's never shown).</span><span class="pw-own" hidden>clear it and type the MySQL root password you chose when this installation was set up.</span> Host <code>localhost</code>, Port <code>3306</code> and Username <code>root</code> stay as they are.</li>
+          <li>Click <strong>Restore</strong>, confirm with <strong>Yes</strong>, and wait for "Database has been restored." A large database takes a while. Click <strong>OK</strong>.</li>
+          <li>Go to the <strong>Database</strong> tab. The restored database is in the list. Click it, then <strong>OK</strong>, and <strong>OK</strong> again on "Database Connection has been changed".</li>
+        </ol>
+      </section>
+      <section>
+        <h3>No: create a new one</h3>
+        <ol>
+          <li><a href="/admin" target="_blank" rel="noopener">Open Server Administration</a>. On the <strong>Database</strong> tab, click the green <strong>+</strong> on the right.</li>
+          <li><strong>Database:</strong> a name for your company database (letters, numbers and underscores). Host <code>localhost</code>, Port <code>3306</code>, Username <code>root</code>.</li>
+          <li><strong>Password:</strong> <span class="pw-image">leave it as it is. Fishbowl fills it in, and that's already the right one (it's never shown).</span><span class="pw-own" hidden>clear it and type the MySQL root password you chose when this installation was set up.</span> Click <strong>Connect</strong>.</li>
+          <li>Fishbowl asks for your <strong>country</strong> and <strong>costing method</strong>. Fishbowl warns that this can't be changed later. Click <strong>OK</strong> and wait while Fishbowl creates the database.</li>
+          <li>Click <strong>OK</strong> to save, then <strong>OK</strong> on "Database Connection has been changed".</li>
+        </ol>
+      </section>
+    </div>
+    <p class="hint">Server Administration closes after the last OK, and this page shows Fishbowl Server starting.</p>
+  </section>
+
+  <!-- .sql files for the Restore tab -->
+  <section class="card" id="imports-card" hidden>
+    <h2>Files and backups to restore</h2>
+    <p id="imports-intro">Files you upload here land in the container's <strong>import</strong> folder, where the <strong>Restore</strong> tab of Server Administration finds .sql backups. Any file type can be uploaded.</p>
+    <div class="row">
+      <input type="file" id="upload-file">
+      <button type="button" id="upload-button" class="primary">Upload</button>
+    </div>
+    <p id="upload-progress-row" hidden><progress id="upload-progress" max="100" value="0"></progress> <span id="upload-progress-text"></span> <button type="button" class="link" id="upload-cancel">Cancel</button></p>
+    <p id="upload-message" hidden></p>
+    <table class="files" id="imports-table" hidden>
+      <thead><tr><th>In the import folder</th><th>Made by</th><th>Size</th><th></th></tr></thead>
+      <tbody id="imports-body"></tbody>
+    </table>
+    <details id="restore-help">
+      <summary>How to restore one while Fishbowl Server is running</summary>
+      <ol>
+        <li><a href="/admin" target="_blank" rel="noopener">Open Server Administration</a>, <strong>Restore</strong> tab. Click the magnifier next to <strong>Restore File</strong>, double-click the <strong>import</strong> folder, pick the file, <strong>Open</strong>.</li>
+        <li><strong>Database:</strong> check the name Fishbowl filled in. A <strong>new name</strong> restores the backup next to your current database, which is the safe choice. An <strong>existing name</strong> replaces that database: everything in it that isn't in the backup is lost.</li>
+        <li><strong>Password:</strong> <span class="pw-image">leave it as it is. Fishbowl fills it in, and that's already the right one (it's never shown).</span><span class="pw-own" hidden>clear it and type the MySQL root password you chose when this installation was set up.</span> Click <strong>Restore</strong>, confirm with <strong>Yes</strong>, wait for "Database has been restored."</li>
+        <li>To switch Fishbowl to the restored database: <strong>Database</strong> tab, click it in the list (the restore put it there), <strong>OK</strong>, and OK on the message that follows. Then press <strong>Restart Fishbowl Server</strong> on this page.</li>
+      </ol>
+      <p class="hint">Replacing the database Fishbowl Server is using right now? Press <strong>Stop Fishbowl Server</strong> first, restore over it, click Cancel to close Server Administration, then press <strong>Start Fishbowl Server</strong>.</p>
+      <p class="hint">A backup made by an older Fishbowl version is updated by Fishbowl Server the first time it starts on it. A trial installation can't do that: Fishbowl refuses with "Trial accounts do not have access to update the database." The list above shows which Fishbowl version made each file. A zipped backup needs unzipping first, because the Restore tab lists <code>.sql</code> files.</p>
+    </details>
+  </section>
+
+  <!-- a newer Fishbowl in this image -->
+  <section class="card" id="upgrade-blocked-card" hidden>
+    <h2>A newer Fishbowl is in this image, but this is a trial</h2>
+    <p id="upgrade-blocked-text"></p>
+  </section>
+
+  <section class="card" id="upgrade-card" hidden>
+    <h2 id="upgrade-title">Upgrade Fishbowl</h2>
+    <p id="upgrade-intro"></p>
+    <form id="upgrade-form" autocomplete="off">
+      <fieldset>
+        <legend>1. The license agreement for the new version</legend>
+        <div class="eula" id="upgrade-eula" tabindex="0">Loading the license agreement…</div>
+        <label class="check"><input type="checkbox" id="upgrade-accept"> <span id="upgrade-accept-label">I have read and accept Fishbowl's license agreement for the new version.</span></label>
+      </fieldset>
+      <fieldset id="upgrade-pw-card" hidden>
+        <legend>2. MySQL root password</legend>
+        <p class="hint">This installation was set up by an earlier version of this image, which asked you to choose a MySQL root password. Type that one. It's used to back up every database before anything is changed.</p>
+        <div class="row">
+          <input type="password" id="upgrade-pw" autocomplete="off" aria-label="MySQL root password">
+          <button type="button" class="reveal" data-for="upgrade-pw">Show</button>
+        </div>
+      </fieldset>
+      <p class="hint">What happens next: Fishbowl Server stops (Fishbowl Clients are disconnected), every database is backed up, Fishbowl's installer updates the program in place, and Fishbowl Server starts again. Your company name, license key and data are kept.</p>
+      <p id="upgrade-error" class="error" hidden></p>
+      <div class="actions"><button type="submit" class="primary" id="upgrade-submit">Back up and upgrade</button></div>
+    </form>
+  </section>
+
+  <section class="card" id="help-card">
+    <details>
+      <summary>Good to know</summary>
+      <ul>
+        <li><strong>Fishbowl Clients on other computers</strong> connect to this computer's name or IP address on the client port published by Docker (2456 unless you changed it).</li>
+        <li><strong>The Fishbowl Client button</strong> opens the Client that's installed inside the container, in a browser tab. There is one of it, and everyone who opens it shares the same window, so it suits the person who looks after the server. Everyone else installs the Fishbowl Client on their own computer.</li>
+        <li><strong>Server Administration</strong> is where you choose the company database, enter a license, change server settings and restore backups. Click OK or Cancel inside it to close it.</li>
+        <li><strong>This page's link</strong>, with its access code: <code>docker exec fishbowl fishbowl-link</code></li>
+        <li><strong>A backup of everything in MySQL</strong>: <code>docker exec -it fishbowl fishbowl-backup</code></li>
+        <li><strong>The log</strong>: <code>docker logs -f fishbowl</code></li>
+      </ul>
+    </details>
+  </section>
+</main>
+<footer class="page">Fishbowl Advanced in a Docker container.</footer>
+</body>
+</html>

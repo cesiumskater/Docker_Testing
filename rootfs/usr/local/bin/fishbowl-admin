@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# fishbowl-admin: open Fishbowl Server Administration in a browser window.
+#
+#   docker exec fishbowl fishbowl-admin
+#
+# Prints the link to the Server Administration window on the Fishbowl page. The
+# same window opens from the page itself ("Open Server Administration").
+
+# shellcheck source=/dev/null
+. /usr/local/lib/fishbowl/common.sh
+
+[ "$(id -u)" = 0 ] || fail 1 "Run it as root: docker exec <container> fishbowl-admin"
+setup_complete || fail 1 "Fishbowl isn't installed yet. Finish first-time setup first (the Fishbowl page, or fishbowl-setup)."
+case "$(current_status)" in
+  awaiting-database|starting|running|paused|server-failed) ;;
+  *) fail 1 "Server Administration can't be opened right now (status: $(current_status))." ;;
+esac
+web_request open-admin
+note "Fishbowl Server Administration opens in your browser:"
+note ""
+note "    $(page_url admin)"
+note ""
+note "(The link needs port $WEB_PORT published: -p 127.0.0.1:$WEB_PORT:$WEB_PORT.)"
+note "Click OK or Cancel in Server Administration to close it. Settings changed while"
+note "Fishbowl Server runs take effect when Fishbowl Server restarts (Restart on the page)."

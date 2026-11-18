@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# fishbowl-link: print the link to the Fishbowl page, with its access code.
+#
+#   docker exec fishbowl fishbowl-link               the page
+#   docker exec fishbowl fishbowl-link admin         the Server Administration window
+#   docker exec fishbowl fishbowl-link client        the Fishbowl Client window
+#   docker exec fishbowl fishbowl-link --new-code    replace the access code (signs every browser out)
+
+# shellcheck source=/dev/null
+. /usr/local/lib/fishbowl/common.sh
+
+[ "$(id -u)" = 0 ] || fail 1 "Run it as root: docker exec <container> fishbowl-link"
+case "${1:-}" in
+  "")           page_url ;;
+  admin|client) page_url "$1" ;;
+  --new-code)
+    web_code_init new
+    note "New access code set. Browsers that were signed in need the new link:"
+    page_url ;;
+  *) fail 2 "usage: fishbowl-link [admin|client|--new-code]" ;;
+esac

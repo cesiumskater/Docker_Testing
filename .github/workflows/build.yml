@@ -1,0 +1,150 @@
+name: Build and publish the image
+
+# The Fishbowl installer lives on ONE release of this repository (tag:
+# fishbowl-installer). Replacing that asset is the whole update: this workflow
+# notices the new installer and publishes
+#   ghcr.io/<owner>/<repo>:<fishbowl version>   and   :latest
+#
+# Triggers:
+#   - schedule: every 6 hours; builds only if the installer asset changed
+#   - schedule: every Monday at 04:41 UTC, always: a rebuild with every package
+#     update published since the last one (update-all.sh --build), so the
+#     published image's packages never go stale (decision 4)
+#   - "Run workflow" button (workflow_dispatch): builds if the asset changed,
+#     or always with "force"
+#   - release published/edited: same check (whether replacing an asset fires
+#     any release event was not testable when this was written; each run logs
+#     the event that started it, so the first swap will show it)
+#   - push to main touching the image's files: always rebuilds
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if the installer has not changed
+        type: boolean
+        default: false
+  schedule:
+    - cron: "23 */6 * * *"
+    - cron: "41 4 * * 1"
+  release:
+    types: [published, edited]
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - build/**
+      - rootfs/**
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-image
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: fishbowl-installer
+
+jobs:
+  check:
+    name: Check the installer on the release
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      image: ${{ steps.image.outputs.image }}
+      version: ${{ steps.asset.outputs.version }}
+      asset_id: ${{ steps.asset.outputs.asset_id }}
+      digest: ${{ steps.asset.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Image name (GHCR needs lowercase)
+        id: image
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Find the installer on the release
+        id: asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          echo "Triggered by: $EVENT_NAME ${EVENT_ACTION}"
+          python3 -I ci/find_installer.py "$GITHUB_REPOSITORY" "$RELEASE_TAG" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR (to read the published image's labels)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          FORCE: ${{ github.event_name == 'push' || inputs.force == true || github.event.schedule == '41 4 * * 1' }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          ASSET_ID: ${{ steps.asset.outputs.asset_id }}
+        run: |
+          if [ "$FORCE" = true ]; then
+            echo "build=true" | tee -a "$GITHUB_OUTPUT"
+            echo "reason=forced by ${GITHUB_EVENT_NAME}" | tee -a "$GITHUB_OUTPUT"
+          else
+            python3 -I ci/needs_build.py "$IMAGE" "$ASSET_ID" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build and push (linux/amd64)
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ${{ needs.check.outputs.image }}
+      VERSION: ${{ needs.check.outputs.version }}
+      ASSET_ID: ${{ needs.check.outputs.asset_id }}
+      DIGEST: ${{ needs.check.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Disk space before the build
+        run: df -h /
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Build
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg INSTALLER_REPO="$GITHUB_REPOSITORY" \
+            --build-arg INSTALLER_RELEASE_TAG="$RELEASE_TAG" \
+            --build-arg EXPECTED_ASSET_ID="$ASSET_ID" \
+            --build-arg PACKAGES_REFRESH="$(date -u +%Y%m%dT%H%M%SZ)" \
+            --build-arg FISHBOWL_IMAGE="$IMAGE:latest" \
+            --label org.opencontainers.image.version="$VERSION" \
+            --label org.opencontainers.image.source="https://github.com/$GITHUB_REPOSITORY" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label io.github.fishbowl-docker.installer-asset-id="$ASSET_ID" \
+            --label io.github.fishbowl-docker.installer-sha256="$DIGEST" \
+            --tag "$IMAGE:$VERSION" --tag "$IMAGE:latest" .
+
+      - name: Smoke test
+        run: |
+          docker run --rm "$IMAGE:$VERSION" versions
+          # Without volumes and without a terminal the container must refuse to start (exit 2).
+          set +e
+          docker run --rm "$IMAGE:$VERSION" > /tmp/no-volumes.txt 2>&1
+          rc=$?
+          set -e
+          cat /tmp/no-volumes.txt
+          test "$rc" = 2
+
+      - name: Push
+        run: |
+          docker push "$IMAGE:$VERSION"
+          docker push "$IMAGE:latest"
+          echo "Published $IMAGE:$VERSION and $IMAGE:latest (installer asset $ASSET_ID)" >> "$GITHUB_STEP_SUMMARY"

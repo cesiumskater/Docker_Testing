@@ -1,0 +1,78 @@
+# Fishbowl Advanced in Docker, with Docker Compose. See README.md.
+#
+#   Start (builds the image from GitHub the first time):
+#       docker compose up -d
+#   Then open the Fishbowl page. Its link, with the access code:
+#       docker exec fishbowl fishbowl-link
+#   Updates: the weekly maintenance (fishbowl-maintain.sh or .ps1, next to this
+#   file) rebuilds the image with every package update, backs up MySQL, and
+#   recreates the container, rolling back if it doesn't come back healthy
+#   (README section 12). A new Fishbowl version also arrives that way; the page
+#   then offers the upgrade, and nothing changes until you accept it there.
+#
+# Run these in the folder that holds this file. They're the same on Linux,
+# macOS and Windows (PowerShell).
+#
+# Per-site settings (ports, the address Clients use, time zone) go in a file
+# named .env next to this one; .env.example lists them. Without one, the
+# defaults below apply.
+#
+# `restart: always` starts the container whenever Docker starts, even if it was
+# stopped by hand before. Docker itself has to start with the computer (README,
+# "Starting automatically"). Volume names are fixed so `docker run` and Compose
+# share the same data.
+name: fishbowl
+
+services:
+  fishbowl:
+    # The image is built from the GitHub repository, which also downloads the
+    # Fishbowl installer from the repository's release. `pull_policy: never`
+    # means Compose builds it when it's missing instead of looking on Docker
+    # Hub. (FB_IMAGE is for the weekly maintenance, which builds a candidate
+    # under its own tag first; leave it unset.)
+    image: ${FB_IMAGE:-fishbowl}
+    pull_policy: never
+    build: https://github.com/cesiumskater/Docker_Testing.git#main
+    # The image is x86-64. On a Mac with Apple Silicon this has Docker build
+    # and run it under emulation; on an x86-64 computer it changes nothing.
+    platform: linux/amd64
+    container_name: fishbowl
+    restart: always
+    # Fishbowl Server and MySQL need time to shut down cleanly.
+    stop_grace_period: 3m
+    # The only ports that may be reached (README, "Network and firewall"):
+    # 2456 and 28192 on FB_LAN_IP (default: every IPv4 address of this
+    # computer), the Fishbowl page on this computer only.
+    ports:
+      - "${FB_LAN_IP:-0.0.0.0}:${FB_CLIENT_PORT:-2456}:2456"     # Fishbowl Clients
+      - "${FB_LAN_IP:-0.0.0.0}:${FB_API_PORT:-28192}:28192"      # Fishbowl's API: integrated apps
+      - "127.0.0.1:${FB_PAGE_PORT:-6080}:6080"                   # the Fishbowl page
+    volumes:
+      - fishbowl-mysql:/var/lib/mysql
+      - fishbowl-app:/opt/Fishbowl
+      - fishbowl-data:/var/lib/fishbowl
+    environment:
+      TZ: ${FB_TZ:-UTC}    # your time zone, for example America/Denver
+    # Hardening (README section 13). The image can't be changed while it runs:
+    # updates come from rebuilds. Only the capabilities the container's start-up
+    # needs to hand MySQL, Fishbowl and the page their own users are kept.
+    read_only: true
+    tmpfs:
+      - /run:mode=0755
+      - /tmp:exec,mode=1777
+      - /var/tmp:mode=1777
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 4096
+    # Optional memory cap, for example FB_MEM_LIMIT=14g in .env. 0 means no cap.
+    # Fishbowl Server alone may use 8 GB, so leave room above that.
+    mem_limit: ${FB_MEM_LIMIT:-0}
+
+volumes:
+  fishbowl-mysql:
+    name: fishbowl-mysql
+  fishbowl-app:
+    name: fishbowl-app
+  fishbowl-data:
+    name: fishbowl-data

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# Database backups stay out of the repository (they hold company data).
+*.sql
+*.sql.gz
+# Your per-site Compose settings (copied from .env.example) stay on your computer.
+.env

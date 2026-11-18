@@ -1,0 +1,4 @@
+# Fishbowl's own MySQL tuning (from its server/bin/my.cnf, minus the settings
+# 90-fishbowl.cnf controls) is written at every start into /run/fishbowl-mysql.d,
+# so the image itself can run read-only. 90-fishbowl.cnf sorts later and wins.
+!includedir /run/fishbowl-mysql.d

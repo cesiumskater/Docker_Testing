@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# fishbowl-backup: consistent backup of every MySQL database while Fishbowl runs.
+#
+#   docker exec -it fishbowl fishbowl-backup
+#   docker exec fishbowl fishbowl-backup --label weekly-maintenance --keep 4
+#
+# Writes a gzipped mysqldump to /var/lib/fishbowl/backups on the data volume and
+# prints its path on the last line.
+#
+#   --label NAME   names the file NAME-<UTC time>.sql.gz (default: fishbowl-backup)
+#   --keep N       then keeps only the N newest files with that label (the others
+#                  with the same label are deleted; other backups are never touched)
+#
+# With a terminal it asks for the MySQL root password (not echoed) only when the
+# installation has one of its own from an earlier version of this image. Without
+# a terminal (a scheduled task) it uses the image's password, and stops with exit
+# status 3 if the installation has its own.
+#
+# Exit status: 0 = written, 1 = failed (nothing written), 2 = usage, 3 = needs a
+# terminal for the password.
+
+# shellcheck source=/dev/null
+. /usr/local/lib/fishbowl/common.sh
+# shellcheck source=/dev/null
+. "$LIB_DIR/setup.sh"
+# shellcheck source=/dev/null
+. "$LIB_DIR/upgrade.sh"
+
+LABEL=fishbowl-backup
+KEEP=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --label) LABEL="${2:-}"; shift 2 || fail 2 "--label needs a name" ;;
+    --keep)  KEEP="${2:-}"; shift 2 || fail 2 "--keep needs a number" ;;
+    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) fail 2 "Usage: fishbowl-backup [--label NAME] [--keep N]" ;;
+  esac
+done
+[[ "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$ ]] || fail 2 "--label takes letters, digits, - and _ (up to 41 characters)."
+[ -z "$KEEP" ] || [[ "$KEEP" =~ ^[1-9][0-9]{0,2}$ ]] || fail 2 "--keep takes a number from 1 to 999."
+
+[ "$(id -u)" = 0 ] || fail 1 "Run it as root: docker exec -it <container> fishbowl-backup"
+mysqladmin --protocol=socket --socket="$MYSQL_SOCKET" ping --silent >/dev/null 2>&1 ||
+  fail 1 "MySQL isn't running in this container. Start the container normally, then run fishbowl-backup."
+trap 'upgrade_cleanup' EXIT
+
+if is_interactive; then
+  rc=0
+  ask_root_password_until_valid || rc=$?
+  [ "$rc" = 0 ] || fail 1 "No valid MySQL root password; no backup taken."
+else
+  # No terminal: the image's password or nothing, never a prompt that hangs a scheduled task.
+  UPG_PW="$(default_root_password)"
+  mysql_root UPG_PW -N -B -e 'SELECT 1' >/dev/null 2>&1 ||
+    fail 3 "This installation has a MySQL root password of its own, so a backup needs it typed: docker exec -it <container> fishbowl-backup"
+fi
+out="$(backup_databases UPG_PW "$LABEL")"
+upgrade_cleanup
+
+if [ -n "$KEEP" ]; then
+  # Newest first by the UTC time in the name; only this label's files.
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name "$LABEL-*.sql.gz" -printf '%f\n' | sort -r |
+    tail -n +"$((KEEP + 1))" | while IFS= read -r old; do
+      rm -f -- "$BACKUP_DIR/$old" && log "Removed an older backup: $old (keeping the newest $KEEP)"
+    done
+fi
+
+note ""
+note "Backup written: $out"
+note "Copy it off the container with:"
+note "  docker cp <container-name>:$out ."
+printf '%s\n' "$out"
