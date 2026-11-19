@@ -14,6 +14,11 @@
 #   versions         print the Fishbowl, MySQL and Java versions in this image
 #   <command>        anything else runs as a command, e.g. bash
 #
+# Also, in the background: the daily scheduled backup (FISHBOWL_BACKUP_TIME), the
+# watchdog that restarts Fishbowl Server or MySQL when it stops answering
+# (FISHBOWL_WATCHDOG), and with FISHBOWL_LOG_STREAM=1 Fishbowl's and MySQL's own
+# logs copied into the container log.
+#
 # How the pieces talk: the page's server (portal.py, user fbweb) and the terminal
 # commands (fishbowl-setup, fishbowl-upgrade, fishbowl-admin) leave small request
 # files in /dev/shm/fishbowl-web. Every waiting loop here calls `tick`, which acts
@@ -41,6 +46,13 @@ PORTAL_PID=""
 UPDATE_PID=""           # update-all.sh, started in the background at every start
 NETCHECK_PID=""         # fishbowl-netcheck --log, once, shortly after every start
 IMAGE_AGE_PID=""        # the daily check of how old the image's packages are
+LOGSTREAM_PID=""        # copies fbserver.log and mysqld.log into the container log (FISHBOWL_LOG_STREAM=1)
+SCHED_BACKUP_PID=""     # the daily scheduled backup (FISHBOWL_BACKUP_TIME)
+WATCHDOG_FAILS=0        # Fishbowl Server checks in a row that got no answer
+WATCHDOG_DB_FAILS=0     # MySQL pings in a row that got no answer
+WATCHDOG_ARMED=0        # 1 once Fishbowl Server has answered a check since its start
+WATCHDOG_NEXT=0         # $SECONDS of the next check
+SERVER_PORT=2456        # Fishbowl Server's client port, read at each start
 PORTAL_RESTARTS=0
 JOB_PID=""              # a setup or upgrade child in progress
 EXPECT_SETUP=0          # 1 while waiting for first-time setup answers
@@ -69,7 +81,9 @@ on_exit() {
   system_update_stop
   netcheck_stop
   image_age_stop
+  backup_schedule_stop
   portal_stop
+  logstream_stop     # last, so the shutdown's own lines in Fishbowl's and MySQL's logs get through
   rm -rf "$WEB_SPOOL"   # requests nobody will read now (they may hold answers)
   set_status stopped
   exit "$rc"
@@ -129,6 +143,80 @@ image_age_stop() {
   wait "$IMAGE_AGE_PID" 2>/dev/null || true
   IMAGE_AGE_PID=""
 }
+
+# ------------------------------------------------------------ log streaming --
+# FISHBOWL_LOG_STREAM=1 (compose.yaml sets it) copies Fishbowl Server's and
+# MySQL's own log files into the container's log, tagged [fbserver] and [mysqld],
+# with secrets blanked out (logstream.py). The files stay where they are.
+logstream_start() {
+  [ "${FISHBOWL_LOG_STREAM:-0}" = 1 ] || return 0
+  python3 -I -u "$LIB_DIR/logstream.py" "fbserver=$FB_SERVER_LOG" "mysqld=$LOG_DIR/mysqld.log" </dev/null &
+  LOGSTREAM_PID=$!
+}
+logstream_stop() {
+  [ -n "$LOGSTREAM_PID" ] || return 0
+  sleep 1   # let the last lines through
+  kill -TERM "$LOGSTREAM_PID" 2>/dev/null || true
+  wait "$LOGSTREAM_PID" 2>/dev/null || true
+  LOGSTREAM_PID=""
+}
+
+# --------------------------------------------------------- scheduled backups --
+# Every day at FISHBOWL_BACKUP_TIME (HH:MM in the container's time zone, TZ;
+# default 01:17), a consistent mysqldump of every database, Fishbowl's settings
+# files and SHA-256 checksums, through fishbowl-backup --label scheduled. Keeps
+# the newest FISHBOWL_BACKUP_KEEP (default 7). "off" turns it off. Writes one
+# line to the container log either way, and the time of the last good one to
+# $STATE_DIR/last-scheduled-backup (for alerts: fishbowl-healthcheck --backup-age).
+backup_time_valid() { [[ "$1" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; }
+seconds_until() {  # seconds_until HH:MM  (local time, today or tomorrow)
+  local now target
+  now="$(date +%s)"
+  target="$(date -d "today $1" +%s)"
+  [ "$target" -gt "$now" ] || target="$(date -d "tomorrow $1" +%s)"
+  printf '%s\n' "$(( target - now ))"
+}
+scheduled_backup() {
+  local keep="${FISHBOWL_BACKUP_KEEP:-7}" status out rc=0
+  [[ "$keep" =~ ^[1-9][0-9]{0,2}$ ]] || keep=7
+  setup_complete || return 0
+  status="$(current_status)"
+  case "$status" in
+    running|paused|awaiting-database|server-failed|starting|upgrade-interrupted) ;;
+    *) log "Scheduled backup skipped: Fishbowl is busy (status: $status); the next one is tomorrow."; return 0 ;;
+  esac
+  out="$(nice -n 10 "$BIN_DIR/fishbowl-backup" --label scheduled --keep "$keep" --with-settings </dev/null 2>&1)" || rc=$?
+  if [ "$rc" = 0 ]; then
+    write_state last-scheduled-backup "$(_ts)"
+    log "Scheduled backup written: $(printf '%s\n' "$out" | tail -n 1) (keeping the newest $keep)"
+  else
+    warn "The scheduled backup failed (exit status $rc): $(printf '%s\n' "$out" | grep -E '\[error\]' | tail -n 1 | sed 's/^.*\[error\] //')"
+  fi
+  return 0
+}
+backup_schedule_start() {
+  local t="${FISHBOWL_BACKUP_TIME-01:17}"
+  case "$t" in ""|off|OFF|0) log "Scheduled backups are off (FISHBOWL_BACKUP_TIME=${t:-empty})."; return 0 ;; esac
+  if ! backup_time_valid "$t"; then
+    warn "FISHBOWL_BACKUP_TIME=$t isn't a time like 01:17, so there are no scheduled backups. Fix it and recreate the container."
+    return 0
+  fi
+  ( trap 'exit 0' TERM
+    while :; do
+      sleep "$(seconds_until "$t")" & wait $!
+      scheduled_backup
+      sleep 90 & wait $!   # never twice in the same minute
+    done ) </dev/null &
+  SCHED_BACKUP_PID=$!
+}
+backup_schedule_stop() {
+  [ -n "$SCHED_BACKUP_PID" ] || return 0
+  pkill -TERM -f "$BIN_DIR/fishbowl-backup --label scheduled" 2>/dev/null || true
+  kill -TERM "$SCHED_BACKUP_PID" 2>/dev/null || true
+  wait "$SCHED_BACKUP_PID" 2>/dev/null || true
+  SCHED_BACKUP_PID=""
+}
+
 # Stopping the container: let a package that is half-installed finish, but not
 # for long (Docker gives the container 10 seconds unless it was started with
 # --stop-timeout, as the README's command does).
@@ -335,7 +423,8 @@ unnamed_volumes_text() {
 
 clear_run_dir() {  # a restarted container keeps /run: drop what the last run left
   mkdir -p "$RUN_DIR"
-  rm -f "$RUN_DIR"/session-* "$MESSAGE_FILE" "$INFO_FILE" "$LAST_ERROR_FILE" "$PENDING_FLAG" "$WEB_CODE_RUN"
+  rm -f "$RUN_DIR"/session-* "$MESSAGE_FILE" "$INFO_FILE" "$LAST_ERROR_FILE" "$PENDING_FLAG" "$WEB_CODE_RUN" \
+        "$RUN_DIR/fishbowl-server.pid" "$RUN_DIR/probe-ok"
   rm -rf "$X_DIR" "$WS_DIR"
   rm -f /tmp/.X1-lock /tmp/.X2-lock /tmp/.X11-unix/X1 /tmp/.X11-unix/X2
   # The Fishbowl Client's embedded browser leaves a profile folder per launch.
@@ -565,8 +654,11 @@ fishbowl_start() {
       INSTALL4J_JAVA_HOME_OVERRIDE="$JAVA21_HOME" INSTALL4J_JAVA_HOME="$JAVA21_HOME" \
       "$FB_SERVICE_LAUNCHER" run &
   FB_PID=$!
+  printf '%s\n' "$FB_PID" > "$RUN_DIR/fishbowl-server.pid"
   cd /
   port="$(client_port)"
+  SERVER_PORT="$port"
+  watchdog_reset
   # No time limit while the server is alive: after an upgrade (or with an older
   # database restored) it updates the database before it listens, and stopping
   # it half-way could damage the database.
@@ -574,6 +666,7 @@ fishbowl_start() {
     if ! kill -0 "$FB_PID" 2>/dev/null; then
       wait "$FB_PID" 2>/dev/null || true
       FB_PID=""
+      rm -f "$RUN_DIR/fishbowl-server.pid"
       START_FAILURE="Fishbowl Server exited while it was starting. Its own log has the reason: $FB_SERVER_LOG (docker exec <container> tail -n 50 $FB_SERVER_LOG). You can start it again here."
       START_RETRY=1
       warn "$START_FAILURE"
@@ -658,6 +751,82 @@ fishbowl_stop() {
   fi
   wait "$FB_PID" 2>/dev/null || true
   FB_PID=""
+  rm -f "$RUN_DIR/fishbowl-server.pid"
+}
+
+# ---------------------------------------------------------------- watchdog --
+# Docker restarts a container that exits, but never one that is merely unhealthy,
+# and a frozen Java process keeps its port open. So while Fishbowl Server runs,
+# the supervisor checks every FISHBOWL_WATCHDOG_INTERVAL seconds (default 5) that
+# it answers an HTTP request on its client port (probe.py) and that MySQL answers
+# a ping. After FISHBOWL_WATCHDOG_FAILURES (default 3) misses in a row it stops the
+# one that hangs and starts it again, like a crash: the same four-in-ten-minutes
+# guard applies. The Fishbowl check is armed only once Fishbowl Server has
+# answered it after a start, so a port that doesn't speak HTTP at all is never
+# mistaken for a hang. FISHBOWL_WATCHDOG=0 turns the watchdog off.
+watchdog_on() { [ "${FISHBOWL_WATCHDOG:-1}" != 0 ]; }
+watchdog_num() {  # watchdog_num VALUE DEFAULT MIN MAX
+  local v="$1"
+  if [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge "$3" ] && [ "$v" -le "$4" ]; then printf '%s\n' "$v"; else printf '%s\n' "$2"; fi
+}
+watchdog_reset() {
+  WATCHDOG_FAILS=0
+  WATCHDOG_DB_FAILS=0
+  WATCHDOG_ARMED=0
+  WATCHDOG_NEXT=0
+  rm -f "$RUN_DIR/probe-ok"
+}
+# Ends a Fishbowl Server that stopped answering: TERM to its whole process group
+# (the launcher and Java), 10 seconds, then KILL. A frozen process only ends with KILL.
+fishbowl_kill_hung() {
+  [ -n "${FB_PID:-}" ] || return 0
+  kill -TERM -- "-$FB_PID" 2>/dev/null || kill -TERM "$FB_PID" 2>/dev/null || true
+  kill -CONT -- "-$FB_PID" 2>/dev/null || true   # a stopped process can only act on TERM once it runs again
+  for _ in $(seq 1 10); do
+    kill -0 "$FB_PID" 2>/dev/null || break
+    sleep 1
+  done
+  kill -KILL -- "-$FB_PID" 2>/dev/null || true
+  kill -KILL "$FB_PID" 2>/dev/null || true
+  wait "$FB_PID" 2>/dev/null || true
+  FB_PID=""
+  rm -f "$RUN_DIR/fishbowl-server.pid"
+}
+# One round of checks. Returns 1 when it ended Fishbowl Server (the caller then
+# treats it as an unexpected stop); MySQL that hangs is ended here and started
+# again by mysql_check on the next turn.
+watchdog_check() {
+  local interval failures out
+  interval="$(watchdog_num "${FISHBOWL_WATCHDOG_INTERVAL:-5}" 5 2 300)"
+  failures="$(watchdog_num "${FISHBOWL_WATCHDOG_FAILURES:-3}" 3 2 100)"
+  [ "$SECONDS" -ge "$WATCHDOG_NEXT" ] || return 0
+  WATCHDOG_NEXT=$((SECONDS + interval))
+  if mysql_is_up; then
+    WATCHDOG_DB_FAILS=0
+  else
+    WATCHDOG_DB_FAILS=$((WATCHDOG_DB_FAILS + 1))
+    if [ "$WATCHDOG_DB_FAILS" -ge "$failures" ] && kill -0 "$MYSQLD_PID" 2>/dev/null; then
+      warn "[watchdog] MySQL is running but hasn't answered $failures pings in a row (${interval}s apart); ending it so it starts again."
+      kill -KILL "$MYSQLD_PID" 2>/dev/null || true
+      WATCHDOG_DB_FAILS=0
+      return 0
+    fi
+  fi
+  if out="$(timeout 15 python3 -I "$LIB_DIR/probe.py" --port "$SERVER_PORT" --timeout 5 2>&1)"; then
+    WATCHDOG_FAILS=0
+    if [ "$WATCHDOG_ARMED" = 0 ]; then
+      WATCHDOG_ARMED=1
+      : > "$RUN_DIR/probe-ok"
+      log "[watchdog] Fishbowl Server answers requests on port $SERVER_PORT; checking every ${interval}s"
+    fi
+    return 0
+  fi
+  [ "$WATCHDOG_ARMED" = 1 ] || return 0
+  WATCHDOG_FAILS=$((WATCHDOG_FAILS + 1))
+  [ "$WATCHDOG_FAILS" -ge "$failures" ] || return 0
+  warn "[watchdog] Fishbowl Server is running but hasn't answered $failures checks in a row (${interval}s apart; last: ${out:-no answer}). Ending it so it starts again."
+  fishbowl_kill_hung
+  return 1
 }
 
 # Fishbowl Server and MySQL are started again in place when they stop without
@@ -751,6 +920,16 @@ supervise() {
       fi
       return 0
     fi
+    if watchdog_on && ! watchdog_check; then
+      if too_many_recoveries; then
+        START_FAILURE="Fishbowl Server stopped answering, or stopped unexpectedly, four times within ten minutes, so it was not started again. Its own log has the reason: $FB_SERVER_LOG (docker exec <container> tail -n 50 $FB_SERVER_LOG). You can start it again here."
+        NEXT=failed
+      else
+        log "Starting Fishbowl Server again"
+        NEXT=start
+      fi
+      return 0
+    fi
     handle_requests
     portal_check
     if [ "$UPGRADE_READY" = 1 ]; then NEXT=upgrade; return 0; fi   # run_upgrade_job stops the server
@@ -817,6 +996,7 @@ run_services() {
       start)
         apply_pending_settings
         sync_server_memory
+        apply_server_xmx
         publish_info
         if ! database_configured; then await_database; fi
         if [ "$NEXT" = start ]; then
@@ -868,6 +1048,7 @@ cmd_run() {
 
   prepare_dirs
   acquire_lock
+  logstream_start
   if [ -n "$(unnamed_volumes)" ]; then
     INFO_VOLUMES=unnamed
     hr; unnamed_volumes_text; hr
@@ -879,6 +1060,7 @@ cmd_run() {
   system_update_start   # in the background; waits its turn behind setup and upgrades
   netcheck_start        # in the background; one warning line if Fishbowl's servers can't be reached
   image_age_start       # in the background; one warning line a day if the image's packages are too old
+  backup_schedule_start # in the background; a backup every day at FISHBOWL_BACKUP_TIME
 
   case "$(detect_state)" in
     # Settings changed in Server Administration (a purchased license, say) count

@@ -8,8 +8,14 @@
 # prints its path on the last line.
 #
 #   --label NAME   names the file NAME-<UTC time>.sql.gz (default: fishbowl-backup)
-#   --keep N       then keeps only the N newest files with that label (the others
+#   --keep N       then keeps only the N newest backups with that label (the others
 #                  with the same label are deleted; other backups are never touched)
+#   --with-settings  also writes NAME-<UTC time>.settings.tar.gz (Fishbowl's
+#                  eve.properties and dbsettings.properties, which hold the License
+#                  Key; owner-only) and NAME-<UTC time>.sha256 (checksums of both
+#                  files). The scheduled backup uses this.
+#   --verify FILE  checks a backup instead of taking one: gzip intact, the dump's
+#                  "-- Dump completed" trailer, and the .sha256 file if there is one
 #
 # With a terminal it asks for the MySQL root password (not echoed) only when the
 # installation has one of its own from an earlier version of this image. Without
@@ -28,14 +34,34 @@
 
 LABEL=fishbowl-backup
 KEEP=""
+SETTINGS=0
+VERIFY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --label) LABEL="${2:-}"; shift 2 || fail 2 "--label needs a name" ;;
     --keep)  KEEP="${2:-}"; shift 2 || fail 2 "--keep needs a number" ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) fail 2 "Usage: fishbowl-backup [--label NAME] [--keep N]" ;;
+    --with-settings) SETTINGS=1; shift ;;
+    --verify) VERIFY="${2:-}"; shift 2 || fail 2 "--verify needs a file" ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) fail 2 "Usage: fishbowl-backup [--label NAME] [--keep N] [--with-settings] | --verify FILE" ;;
   esac
 done
+
+# --verify: read a backup back without touching MySQL.
+if [ -n "$VERIFY" ]; then
+  [ -f "$VERIFY" ] || fail 1 "No such file: $VERIFY"
+  gzip -t "$VERIFY" 2>/dev/null || fail 1 "$VERIFY is damaged (gzip test failed)."
+  gzip -dc "$VERIFY" | tail -n 1 | grep -q '^-- Dump completed' ||
+    fail 1 "$VERIFY is incomplete (no '-- Dump completed' trailer)."
+  sums="${VERIFY%.sql.gz}.sha256"
+  if [ -f "$sums" ]; then
+    ( cd "$(dirname "$VERIFY")" && sha256sum --quiet -c "$(basename "$sums")" ) ||
+      fail 1 "$VERIFY doesn't match its checksums in $sums."
+    log "Checksums match ($sums)"
+  fi
+  log "Backup OK: $VERIFY"
+  exit 0
+fi
 [[ "$LABEL" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$ ]] || fail 2 "--label takes letters, digits, - and _ (up to 41 characters)."
 [ -z "$KEEP" ] || [[ "$KEEP" =~ ^[1-9][0-9]{0,2}$ ]] || fail 2 "--keep takes a number from 1 to 999."
 
@@ -57,12 +83,35 @@ fi
 out="$(backup_databases UPG_PW "$LABEL")"
 upgrade_cleanup
 
+if [ "$SETTINGS" = 1 ]; then
+  base="${out%.sql.gz}"
+  files=()
+  for f in "$FB_EVE" "$FB_BIN/dbsettings.properties"; do
+    [ -f "$f" ] && files+=("${f#/}")
+  done
+  if [ "${#files[@]}" -gt 0 ]; then
+    if ! ( umask 077; tar -czf "$base.settings.tar.gz.part" -C / "${files[@]}" ); then
+      rm -f "$base.settings.tar.gz.part"
+      fail 1 "Could not save Fishbowl's settings files next to $out (the database backup itself is fine)."
+    fi
+    mv -f "$base.settings.tar.gz.part" "$base.settings.tar.gz"
+  fi
+  sumfiles=("$(basename "$out")")
+  [ -f "$base.settings.tar.gz" ] && sumfiles+=("$(basename "$base.settings.tar.gz")")
+  ( cd "$BACKUP_DIR" && umask 077 && sha256sum "${sumfiles[@]}" > "$base.sha256" )
+  chmod 0600 "$base".* 2>/dev/null || true
+fi
+
 if [ -n "$KEEP" ]; then
-  # Newest first by the UTC time in the name; only this label's files.
+  # Newest first by the UTC time in the name; only this label's backups, each
+  # with its settings archive and checksums. Leftovers of an interrupted run go too.
   find "$BACKUP_DIR" -maxdepth 1 -type f -name "$LABEL-*.sql.gz" -printf '%f\n' | sort -r |
     tail -n +"$((KEEP + 1))" | while IFS= read -r old; do
-      rm -f -- "$BACKUP_DIR/$old" && log "Removed an older backup: $old (keeping the newest $KEEP)"
+      b="${old%.sql.gz}"
+      rm -f -- "$BACKUP_DIR/$old" "$BACKUP_DIR/$b.settings.tar.gz" "$BACKUP_DIR/$b.sha256" &&
+        log "Removed an older backup: $old (keeping the newest $KEEP)"
     done
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name "$LABEL-*.part" -mmin +60 -delete 2>/dev/null || true
 fi
 
 note ""

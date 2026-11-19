@@ -80,6 +80,8 @@ cp "$REPO/tools/fishbowl-maintain.sh" "$WORK/site/"
 cd "$WORK/site" || exit 2
 
 echo "== starting Fishbowl with Compose (builds the image)"
+# compose.yaml's volumes are external: created once, never by Compose.
+for v in mysql app data; do docker volume create "fbmaint-$v" >/dev/null; done
 docker compose up -d > "$WORK/up.log" 2>&1 || { tail -n 30 "$WORK/up.log"; fail "docker compose up"; exit 1; }
 python3 -I - "$HERE/lib" <<'PY' || { fail "setup on the page"; exit 1; }
 import sys, time

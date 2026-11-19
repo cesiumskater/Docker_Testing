@@ -1,5 +1,10 @@
 # Fishbowl Advanced in Docker, with Docker Compose. See README.md.
 #
+#   Once, before the first start: create the three volumes (Compose never
+#   creates or deletes them, so `docker compose down -v` can't take your data):
+#       docker volume create fishbowl-mysql
+#       docker volume create fishbowl-app
+#       docker volume create fishbowl-data
 #   Start (builds the image from GitHub the first time):
 #       docker compose up -d
 #   Then open the Fishbowl page. Its link, with the access code:
@@ -13,9 +18,10 @@
 # Run these in the folder that holds this file. They're the same on Linux,
 # macOS and Windows (PowerShell).
 #
-# Per-site settings (ports, the address Clients use, time zone) go in a file
-# named .env next to this one; .env.example lists them. Without one, the
-# defaults below apply.
+# Per-site settings (ports, the address Clients use, time zone, Fishbowl
+# Server's heap, the backup time) go in a file named .env next to this one;
+# .env.example lists them. Without one, the defaults below apply. No password
+# ever goes in .env.
 #
 # `restart: always` starts the container whenever Docker starts, even if it was
 # stopped by hand before. Docker itself has to start with the computer (README,
@@ -37,6 +43,9 @@ services:
     # and run it under emulation; on an x86-64 computer it changes nothing.
     platform: linux/amd64
     container_name: fishbowl
+    # "run" normally. "admin" keeps Fishbowl Server stopped until you start it on
+    # the page (MySQL and the page run); tests/gates.sh uses it.
+    command: ["${FB_START_MODE:-run}"]
     restart: always
     # Fishbowl Server and MySQL need time to shut down cleanly.
     stop_grace_period: 3m
@@ -52,7 +61,12 @@ services:
       - fishbowl-app:/opt/Fishbowl
       - fishbowl-data:/var/lib/fishbowl
     environment:
-      TZ: ${FB_TZ:-UTC}    # your time zone, for example America/Denver
+      TZ: ${FB_TZ:-UTC}                                  # your time zone, for example America/Denver
+      FISHBOWL_SERVER_XMX: ${FB_SERVER_XMX:-}            # Fishbowl Server's heap, e.g. 6g; empty: Server Administration's value
+      FISHBOWL_BACKUP_TIME: ${FB_BACKUP_TIME:-01:17}     # daily backup at this time (TZ); "off" for none
+      FISHBOWL_BACKUP_KEEP: ${FB_BACKUP_KEEP:-7}         # how many daily backups to keep
+      FISHBOWL_LOG_STREAM: ${FB_LOG_STREAM:-1}           # Fishbowl Server's and MySQL's logs in `docker logs` too
+      FISHBOWL_WATCHDOG: ${FB_WATCHDOG:-1}               # restart Fishbowl Server or MySQL when it stops answering
     # Hardening (README section 13). The image can't be changed while it runs:
     # updates come from rebuilds. Only the capabilities the container's start-up
     # needs to hand MySQL, Fishbowl and the page their own users are kept.
@@ -66,13 +80,26 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 4096
     # Optional memory cap, for example FB_MEM_LIMIT=14g in .env. 0 means no cap.
-    # Fishbowl Server alone may use 8 GB, so leave room above that.
+    # Fishbowl Server alone may use 8 GB (or FB_SERVER_XMX), so leave room above that.
     mem_limit: ${FB_MEM_LIMIT:-0}
+    # The container's log, with Fishbowl Server's and MySQL's lines in it, is
+    # capped at 5 files of 10 MB; `docker logs` keeps working.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
+# Created once with `docker volume create` (above), never by Compose: `docker
+# compose down -v` leaves them alone. To start over with no data at all, remove
+# them by hand (README section 7).
 volumes:
   fishbowl-mysql:
     name: fishbowl-mysql
+    external: true
   fishbowl-app:
     name: fishbowl-app
+    external: true
   fishbowl-data:
     name: fishbowl-data
+    external: true

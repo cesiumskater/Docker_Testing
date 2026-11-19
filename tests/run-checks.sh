@@ -10,7 +10,10 @@
 #                     without touching GitHub. Needed unless --only runtime
 #                     together with --image.
 #   --image IMAGE     Test this image instead of building one (runtime checks).
-#   --only GROUP      build | runtime | update | upgrade | reference (default: all)
+#   --only GROUP      unit | build | runtime | update | upgrade | reference
+#                     (default: all). "unit" needs neither Docker nor an
+#                     installer: the watchdog's probe, the log streaming and the
+#                     Java repository file, in plain Python.
 #   --reference-sql FILE
 #                     A known-good backup made by Fishbowl (a .sql from Backup
 #                     Database or the Schedule module). The reference checks
@@ -56,11 +59,11 @@ while [ $# -gt 0 ]; do
     --only) ONLY="$2"; shift 2 ;;
     --reference-sql) REFERENCE_SQL="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"; shift 2 ;;
     --keep) KEEP=1; shift ;;
-    -h|--help) sed -n '2,41p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,44p' "$0"; exit 0 ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
-case "$ONLY" in all|build|runtime|update|upgrade|reference) ;; *) echo "--only takes build, runtime, update, upgrade or reference" >&2; exit 2 ;; esac
+case "$ONLY" in all|unit|build|runtime|update|upgrade|reference) ;; *) echo "--only takes unit, build, runtime, update, upgrade or reference" >&2; exit 2 ;; esac
 if [ -n "$REFERENCE_SQL" ] && [ ! -f "$REFERENCE_SQL" ]; then echo "--reference-sql: no such file: $REFERENCE_SQL" >&2; exit 2; fi
 if [ "$ONLY" = reference ] && [ -z "$REFERENCE_SQL" ]; then echo "--only reference needs --reference-sql FILE" >&2; exit 2; fi
 export VNCDO="${VNCDO:-$(command -v vncdo || true)}"
@@ -84,7 +87,9 @@ want() { [ "$ONLY" = all ] || [ "$ONLY" = "$1" ]; }
 cleanup() {
   local p
   for p in "${MOCK_PIDS[@]}"; do kill "$p" 2>/dev/null; done
-  if [ "$KEEP" = 0 ]; then
+  if [ "$KEEP" = 0 ] && [ "$ONLY" = unit ]; then
+    rm -rf "$WORK"
+  elif [ "$KEEP" = 0 ]; then
     docker ps -aq --filter name=fbcheck- | xargs -r docker rm -f -v >/dev/null 2>&1
     docker volume ls -q --filter name=fbcheck- | xargs -r docker volume rm >/dev/null 2>&1
     docker images -q --filter reference='fbcheck/*' | sort -u | xargs -r docker image rm -f >/dev/null 2>&1
@@ -117,6 +122,18 @@ scenarios() {  # scenarios runtime|upgrade [extra args]
   done < <("$PYTHON" "$LIB/scenarios.py" "$group" --image "$IMAGE" --password "$PW" \
              --port $((PORT_BASE+10)) --work "$WORK/$group" "$@" 2>"$WORK/$group.stderr")
 }
+
+# ---------------------------------------------------------------- unit -----
+if want unit; then
+  echo "== unit checks (no Docker)"
+  if python3 -I -m unittest discover -s "$HERE/unit" -t "$HERE/unit" > "$WORK/unit.log" 2>&1; then
+    pass "unit checks: probe.py, logstream.py, adoptium-repo.py"
+  else
+    tail -n 20 "$WORK/unit.log"
+    fail "unit checks (python3 -I -m unittest discover -s tests/unit -v shows which)"
+  fi
+  [ "$ONLY" = unit ] && { echo "passed: $PASSES  failed: $FAILS"; [ "$FAILS" = 0 ]; exit; }
+fi
 
 # ---------------------------------------------------------------- build ----
 if want build || want upgrade || [ -z "$IMAGE" ]; then

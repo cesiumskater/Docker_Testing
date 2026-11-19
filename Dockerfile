@@ -8,7 +8,10 @@
 # No "# syntax=" line on purpose: the Dockerfile frontend built into Docker is
 # used, so a build never has to pull an extra image from Docker Hub.
 
-ARG FEDORA_IMAGE=registry.fedoraproject.org/fedora:44
+# Fedora Linux 45 (released 3 November 2026). Each Fedora release gets updates
+# for about 13 months, so move this to the next release while the current one
+# is still supported (README section 14, "Moving to a new Fedora release").
+ARG FEDORA_IMAGE=registry.fedoraproject.org/fedora:45
 
 # ---------------------------------------------------------------------------
 # Stage 1: find the installer on the GitHub release, download and inspect it
@@ -40,9 +43,17 @@ RUN python3 -I /build/fetch-installer.py --release-json /build/release.json --ou
 # ---------------------------------------------------------------------------
 FROM ${FEDORA_IMAGE}
 
-# MySQL 8.4 from Fedora's own repositories (the install guide's lab-tested
-# source), pinned to 8.4.x so a rebuild can never drift to 9.x. Java 21 is
-# Eclipse Temurin from Adoptium's repository, as in the guide.
+# MySQL 8.4 from Fedora's own repositories (the install guide's tested source),
+# pinned to 8.4.x so a rebuild can never drift to 9.x. Fedora 45 made MySQL 9.7
+# its default ("mysql-server" now installs 9.7, which Fishbowl rejects), so the
+# image asks for the versioned mysql8.4 packages by name.
+#
+# Java 21 is Eclipse Temurin from Adoptium's repository, as in the guide. Fedora
+# no longer ships Java 21 itself. adoptium-repo.py writes the repository file:
+# Adoptium publishes one package tree per Fedora release, sometimes weeks after
+# that release comes out (Fedora 45's was missing at release), so it uses the
+# newest tree that exists, this release's or an earlier one. Temurin's packages
+# don't depend on one Fedora release. The weekly rebuild checks again.
 #
 # The last two package lines are for the browser windows (fishbowl-session):
 #   tigervnc-x11-server  Xvnc, a virtual screen that resizes with the browser tab
@@ -56,26 +67,34 @@ FROM ${FEDORA_IMAGE}
 # file capability (same layer, so the binary isn't stored twice), which beats
 # asking every user for --cap-add.
 #
+# Nothing here runs as root through a setuid or setgid program (the container
+# starts as root and drops privileges itself, and no-new-privileges would ignore
+# the bits anyway), so they are stripped from every file (CIS Docker 4.8).
+#
 # update-all.sh --build then applies every package update published so far, in
 # the same layer, and fails the build if a repository can't be read or the
 # runtime check fails: no image ships quietly unpatched (decision 4). It also
 # runs verify-runtime.sh: MySQL 8.4.x, Java 21, the browser-window pieces.
-COPY rootfs/usr/local/lib/fishbowl/verify-runtime.sh /usr/local/lib/fishbowl/verify-runtime.sh
+COPY rootfs/usr/local/lib/fishbowl/verify-runtime.sh rootfs/usr/local/lib/fishbowl/adoptium-repo.py /usr/local/lib/fishbowl/
 COPY rootfs/usr/local/bin/update-all.sh /usr/local/bin/update-all.sh
 # A new value makes Docker run the next step again instead of reusing its cache.
 # The weekly maintenance and the weekly CI build pass the date; a plain build
 # passes nothing, and its packages are as new as that step's last run.
 ARG PACKAGES_REFRESH=
+# Empty: use the newest Adoptium tree that exists for this Fedora release or an
+# earlier one. A number (such as 45) forces that tree.
+ARG ADOPTIUM_FEDORA_RELEASE=
 RUN dnf -y install --setopt=install_weak_deps=False \
-        'mysql-server-8.4.*' 'mysql-8.4.*' \
-        adoptium-temurin-java-repository \
+        'mysql8.4-server-8.4.*' 'mysql8.4-8.4.*' \
         tini util-linux shadow-utils procps-ng findutils which less gzip tar tzdata \
         python3 libcap \
         tigervnc-x11-server openbox novnc python3-websockify dejavu-sans-fonts \
         gtk3 nss nspr \
- && dnf -y install --setopt=install_weak_deps=False \
-        --enablerepo=adoptium-temurin-java-repository temurin-21-jdk \
+ && python3 -I /usr/local/lib/fishbowl/adoptium-repo.py --release "${ADOPTIUM_FEDORA_RELEASE}" \
+        --out /etc/yum.repos.d/adoptium.repo \
+ && dnf -y install --setopt=install_weak_deps=False temurin-21-jdk \
  && bash /usr/local/bin/update-all.sh --build \
+ && find / -xdev -perm /6000 -type f -exec chmod a-s {} + \
  && mkdir -p /usr/local/share/fishbowl \
  && date -u +%Y-%m-%dT%H:%M:%SZ > /usr/local/share/fishbowl/image-built \
  && dnf clean all \
@@ -99,7 +118,7 @@ RUN chmod 0755 /usr/local/bin/fishbowl-* /usr/local/bin/update-all.sh /usr/local
  && chmod 0755 /usr/local/lib/fishbowl/verify-runtime.sh \
  && find /usr/local/share/fishbowl -type d -exec chmod 0755 {} + \
  && find /usr/local/share/fishbowl -type f -exec chmod 0644 {} + \
- && python3 -I -m py_compile /usr/local/lib/fishbowl/portal.py \
+ && for f in /usr/local/lib/fishbowl/*.py; do python3 -I -m py_compile "$f" || exit 1; done \
  && mkdir -p /opt/Fishbowl /var/lib/fishbowl \
  && test -z "$(ls -A /var/lib/mysql)"
 

@@ -457,6 +457,7 @@ sync_server_memory() {
   local src="$FB_BIN/Fishbowl_Server_Service.vmoptions" dst="$FB_BIN/Fishbowl Server Service.vmoptions"
   local want have
   [ -f "$src" ] || return 0
+  [ -z "${FISHBOWL_SERVER_XMX:-}" ] || return 0   # the heap comes from .env instead (apply_server_xmx)
   want="$(xmx_of "$src")"
   have="$(xmx_of "$dst")"
   [ -n "$want" ] && [ "$want" != "$have" ] || return 0
@@ -467,6 +468,29 @@ sync_server_memory() {
   fi
   chown "$FB_USER:$FB_USER" "$dst"
   log "Server memory changed in Server Administration: now ${want} (was ${have:-unset})"
+}
+
+# FISHBOWL_SERVER_XMX (compose.yaml: FB_SERVER_XMX in .env) sets Fishbowl Server's
+# heap from outside, such as 6144m or 6g. Written into the file the service
+# launcher reads before every start, so it wins over Server Administration's
+# "Server memory" while it's set. Empty: Server Administration's value stands.
+apply_server_xmx() {
+  local want="${FISHBOWL_SERVER_XMX:-}" dst="$FB_BIN/Fishbowl Server Service.vmoptions" have
+  [ -n "$want" ] || return 0
+  if ! [[ "$want" =~ ^[1-9][0-9]{0,6}[mMgG]$ ]]; then
+    warn "FISHBOWL_SERVER_XMX=$want isn't a size like 6144m or 6g; Server Administration's server memory applies instead."
+    return 0
+  fi
+  [ -d "$FB_BIN" ] || return 0
+  have="$(xmx_of "$dst")"
+  [ "$have" != "$want" ] || return 0
+  if [ -f "$dst" ] && grep -qE '^-Xmx' "$dst"; then
+    sed -i -E "s/^-Xmx.*/-Xmx${want}/" "$dst"
+  else
+    printf -- '-Xmx%s\n' "$want" >> "$dst"
+  fi
+  chown "$FB_USER:$FB_USER" "$dst"
+  log "Server memory set from FISHBOWL_SERVER_XMX: -Xmx${want} (was ${have:-unset}); Server Administration's value doesn't apply while it's set"
 }
 
 verify_memory_settings() {  # fails if 8192 / 2048 did not take effect

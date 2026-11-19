@@ -135,13 +135,44 @@ jobs:
       - name: Smoke test
         run: |
           docker run --rm "$IMAGE:$VERSION" versions
-          # Without volumes and without a terminal the container must refuse to start (exit 2).
-          set +e
-          docker run --rm "$IMAGE:$VERSION" > /tmp/no-volumes.txt 2>&1
-          rc=$?
-          set -e
-          cat /tmp/no-volumes.txt
-          test "$rc" = 2
+          # Started the hardened way, detached, with no terminal: the container must
+          # stay up and wait for first-time setup on its page (it never exits to ask).
+          docker volume create smoke-mysql >/dev/null
+          docker volume create smoke-app >/dev/null
+          docker volume create smoke-data >/dev/null
+          docker run -d --name smoke -p 127.0.0.1:6080:6080 \
+            -v smoke-mysql:/var/lib/mysql -v smoke-app:/opt/Fishbowl -v smoke-data:/var/lib/fishbowl \
+            --read-only --tmpfs /run:mode=0755 --tmpfs /tmp:exec,mode=1777 --tmpfs /var/tmp:mode=1777 \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+            --cap-add KILL --cap-add SETGID --cap-add SETUID \
+            --security-opt no-new-privileges:true --pids-limit 4096 \
+            "$IMAGE:$VERSION"
+          status=""
+          for _ in $(seq 1 90); do
+            status="$(docker exec smoke cat /run/fishbowl/status 2>/dev/null || true)"
+            [ "$status" = needs-setup ] && break
+            sleep 2
+          done
+          docker logs smoke 2>&1 | tail -n 40
+          docker exec smoke fishbowl-link | grep -q 'code=' || status="no link"
+          curl -fsS -o /dev/null http://127.0.0.1:6080/login.html || status="page not answering"
+          docker rm -f smoke >/dev/null
+          docker volume rm smoke-mysql smoke-app smoke-data >/dev/null
+          echo "Status: $status"
+          test "$status" = needs-setup
+
+      - name: Vulnerability report (Trivy; doesn't block the release)
+        # Lists fixable High and Critical findings. It runs after every build, so a
+        # finding that a package update fixes shows here until the next rebuild.
+        # To block publishing on findings, remove continue-on-error.
+        continue-on-error: true
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest image \
+            --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+            "$IMAGE:$VERSION" | tee /tmp/trivy.txt
+          rc=${PIPESTATUS[0]}
+          { echo '### Trivy: fixable High and Critical findings'; echo '```'; tail -n 60 /tmp/trivy.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
       - name: Push
         run: |

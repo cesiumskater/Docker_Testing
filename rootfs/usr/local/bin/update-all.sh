@@ -143,19 +143,26 @@ if have dnf; then
     [ "$BUILD" = 1 ] && SKIP_UNAVAILABLE=False
     DNF=(dnf -y --setopt=install_weak_deps=False --setopt=skip_if_unavailable="$SKIP_UNAVAILABLE"
          --setopt=timeout=30 --setopt=retries=2)
-    # Eclipse Temurin (Java 21) comes from Adoptium's repository, which is
-    # installed switched off; turn it on for this run so Java gets its fixes too.
-    if [ -f /etc/yum.repos.d/adoptium-temurin-java-repository.repo ]; then
-        DNF+=(--enablerepo=adoptium-temurin-java-repository)
-    fi
+    # Eclipse Temurin (Java 21) comes from Adoptium's repository. The image's own
+    # repository file (/etc/yum.repos.d/adoptium.repo, written at build time) is
+    # switched on already. Fedora's adoptium-temurin-java-repository package, if
+    # something installed it, comes switched off: turn it on for this run so Java
+    # gets its fixes either way. (Fedora 45 keeps repository files in
+    # /usr/share/dnf5/repos.d as well as /etc/yum.repos.d.)
+    for repo_dir in /etc/yum.repos.d /usr/share/dnf5/repos.d; do
+        if [ -f "$repo_dir/adoptium-temurin-java-repository.repo" ]; then
+            DNF+=(--enablerepo=adoptium-temurin-java-repository)
+            break
+        fi
+    done
     RUNNER=(timeout "$TIMEOUT_SECS")
     have nice && RUNNER=(nice -n 19 "${RUNNER[@]}")
     have ionice && RUNNER=(ionice -c3 "${RUNNER[@]}")
 
     # Look first. Fishbowl Server needs MySQL 8.4.x and Java 21, so an update
     # that would change either one's major version is left out (everything else
-    # still updates). Fedora keeps MySQL 8.4 and Temurin 21 on those versions,
-    # so in practice this stays quiet.
+    # still updates). The image installs the versioned mysql8.4 packages and
+    # Adoptium's repository offers Temurin 21 only, so in practice this stays quiet.
     EXCLUDES=()
     CANDIDATES="$("${DNF[@]}" -q repoquery --upgrades --latest-limit=1 --queryformat '%{name} %{version}\n')"
     REPO_RC=$?
@@ -168,7 +175,7 @@ if have dnf; then
         while read -r name version; do
             [ -n "${name:-}" ] || continue
             case "$name" in
-                mysql|mysql-*|community-mysql*)
+                mysql|mysql-*|mysql8.4|mysql8.4-*|community-mysql*)
                     if [[ "$version" != 8.4.* ]]; then EXCLUDES+=("--exclude=mysql*" "--exclude=community-mysql*"); echo "Skipping MySQL packages: $name $version is not 8.4.x"; fi ;;
                 temurin-*)
                     if [[ "$version" != 21.* ]]; then EXCLUDES+=("--exclude=temurin-*"); echo "Skipping Java packages: $name $version is not Java 21"; fi ;;
