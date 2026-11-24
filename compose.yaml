@@ -1,105 +1,395 @@
 # Fishbowl Advanced in Docker, with Docker Compose. See README.md.
 #
-#   Once, before the first start: create the three volumes (Compose never
-#   creates or deletes them, so `docker compose down -v` can't take your data):
-#       docker volume create fishbowl-mysql
-#       docker volume create fishbowl-app
-#       docker volume create fishbowl-data
-#   Start (builds the image from GitHub the first time):
+#   Once: the volumes, and the MySQL root password file (README, "The Compose stack"):
+#       docker volume create fishbowl-mysql    (also fishbowl-app, fishbowl-data,
+#                                               fishbowl-backups, fishbowl-dbconf, fishbowl-edge)
+#       secrets/mysql-root-password.txt
+#   Start (builds the images from GitHub the first time):
 #       docker compose up -d
-#   Then open the Fishbowl page. Its link, with the access code:
+#   Then open the Fishbowl page. Its links, with the access code:
 #       docker exec fishbowl fishbowl-link
 #   Updates: the weekly maintenance (fishbowl-maintain.sh or .ps1, next to this
-#   file) rebuilds the image with every package update, backs up MySQL, and
-#   recreates the container, rolling back if it doesn't come back healthy
+#   file) rebuilds every image with every package update, backs up MySQL, and
+#   recreates the containers, rolling back if they don't come back healthy
 #   (README section 12). A new Fishbowl version also arrives that way; the page
 #   then offers the upgrade, and nothing changes until you accept it there.
 #
 # Run these in the folder that holds this file. They're the same on Linux,
 # macOS and Windows (PowerShell).
 #
-# Per-site settings (ports, the address Clients use, time zone, Fishbowl
-# Server's heap, the backup time) go in a file named .env next to this one;
-# .env.example lists them. Without one, the defaults below apply. No password
-# ever goes in .env.
+# Per-site settings (the name people use, ports, certificates, time zone) go in
+# a file named .env next to this one; .env.example lists them. Without one, the
+# defaults below apply.
 #
-# `restart: always` starts the container whenever Docker starts, even if it was
+# The containers (README, "The Compose stack"). None of the long-running ones
+# runs as root:
+#   fishbowl   Fishbowl Server, its first-time setup and its upgrades (uid 1000).
+#              On internal networks only: nothing reaches it from outside except
+#              through the edge, and it reaches the internet only through egress.
+#   page       The Fishbowl page (uid 1001). Never on the data network, never
+#              holds a password.
+#   desktop    Server Administration and the Fishbowl Client, each on a private
+#              virtual screen the page shows in your browser (uid 1000).
+#   volume-init  Runs first and exits: hands the volumes to those users (root,
+#              with three capabilities and no network; nothing to do after the
+#              first time).
+#   db         MySQL 8.4, on the data network only (no published port, no route
+#              out). Root signs in only from that network (decision 3).
+#   backup     A verified dump of every database every night (FB_BACKUP_TIME),
+#              kept 14 days, 8 weeks and 12 months by default.
+#   edge       HTTPS for the Fishbowl page (443), the page on this computer
+#              (127.0.0.1:6080), and TLS for Fishbowl Clients when FB_CLIENT_TLS=edge.
+#   edge-tcp   Ports 2456 (Fishbowl Clients) and 28192 (integrated apps), passed
+#              through to Fishbowl Server.
+#   egress     The only way out: Fishbowl's own servers, by name, nothing else.
+#
+# `restart: always` starts every container whenever Docker starts, even one
 # stopped by hand before. Docker itself has to start with the computer (README,
-# "Starting automatically"). Volume names are fixed so `docker run` and Compose
-# share the same data.
+# "Starting automatically").
 name: fishbowl
 
+# Every container: read-only, no capabilities unless listed, no privilege
+# escalation, logs rotated so they can't fill the disk.
+x-hardened: &hardened
+  restart: always
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
 services:
-  fishbowl:
-    # The image is built from the GitHub repository, which also downloads the
-    # Fishbowl installer from the repository's release. `pull_policy: never`
-    # means Compose builds it when it's missing instead of looking on Docker
-    # Hub. (FB_IMAGE is for the weekly maintenance, which builds a candidate
-    # under its own tag first; leave it unset.)
-    image: ${FB_IMAGE:-fishbowl}
+  # Once, before the others: who owns what on the volumes (fishbowl-volume-init).
+  # It changes only what's wrong, so after the first run it's done in a second.
+  volume-init:
+    # The server's image (the fishbowl service builds it).
+    image: ${FB_IMAGE:-fishbowl-server}
     pull_policy: never
-    build: https://github.com/cesiumskater/Docker_Testing.git#main
-    # The image is x86-64. On a Mac with Apple Silicon this has Docker build
-    # and run it under emulation; on an x86-64 computer it changes nothing.
     platform: linux/amd64
-    container_name: fishbowl
-    # "run" normally. "admin" keeps Fishbowl Server stopped until you start it on
-    # the page (MySQL and the page run); tests/gates.sh uses it.
-    command: ["${FB_START_MODE:-run}"]
-    restart: always
-    # Fishbowl Server and MySQL need time to shut down cleanly.
-    stop_grace_period: 3m
-    # The only ports that may be reached (README, "Network and firewall"):
-    # 2456 and 28192 on FB_LAN_IP (default: every IPv4 address of this
-    # computer), the Fishbowl page on this computer only.
-    ports:
-      - "${FB_LAN_IP:-0.0.0.0}:${FB_CLIENT_PORT:-2456}:2456"     # Fishbowl Clients
-      - "${FB_LAN_IP:-0.0.0.0}:${FB_API_PORT:-28192}:28192"      # Fishbowl's API: integrated apps
-      - "127.0.0.1:${FB_PAGE_PORT:-6080}:6080"                   # the Fishbowl page
+    container_name: fishbowl-volume-init
+    entrypoint: ["/usr/local/bin/fishbowl-volume-init"]
+    user: "0:0"
+    restart: "no"
+    read_only: true
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: ["no-new-privileges:true"]
     volumes:
-      - fishbowl-mysql:/var/lib/mysql
       - fishbowl-app:/opt/Fishbowl
       - fishbowl-data:/var/lib/fishbowl
-    environment:
-      TZ: ${FB_TZ:-UTC}                                  # your time zone, for example America/Denver
-      FISHBOWL_SERVER_XMX: ${FB_SERVER_XMX:-}            # Fishbowl Server's heap, e.g. 6g; empty: Server Administration's value
-      FISHBOWL_BACKUP_TIME: ${FB_BACKUP_TIME:-01:17}     # daily backup at this time (TZ); "off" for none
-      FISHBOWL_BACKUP_KEEP: ${FB_BACKUP_KEEP:-7}         # how many daily backups to keep
-      FISHBOWL_LOG_STREAM: ${FB_LOG_STREAM:-1}           # Fishbowl Server's and MySQL's logs in `docker logs` too
-      FISHBOWL_WATCHDOG: ${FB_WATCHDOG:-1}               # restart Fishbowl Server or MySQL when it stops answering
-    # Hardening (README section 13). The image can't be changed while it runs:
-    # updates come from rebuilds. Only the capabilities the container's start-up
-    # needs to hand MySQL, Fishbowl and the page their own users are kept.
-    read_only: true
-    tmpfs:
-      - /run:mode=0755
-      - /tmp:exec,mode=1777
-      - /var/tmp:mode=1777
-    cap_drop: [ALL]
-    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, KILL, SETGID, SETUID]
-    security_opt: ["no-new-privileges:true"]
-    pids_limit: 4096
-    # Optional memory cap, for example FB_MEM_LIMIT=14g in .env. 0 means no cap.
-    # Fishbowl Server alone may use 8 GB (or FB_SERVER_XMX), so leave room above that.
-    mem_limit: ${FB_MEM_LIMIT:-0}
-    # The container's log, with Fishbowl Server's and MySQL's lines in it, is
-    # capped at 5 files of 10 MB; `docker logs` keeps working.
+      - fishbowl-dbconf:/var/lib/fishbowl-dbconf
     logging:
       driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
+      options: { max-size: "1m", max-file: "2" }
 
-# Created once with `docker volume create` (above), never by Compose: `docker
-# compose down -v` leaves them alone. To start over with no data at all, remove
-# them by hand (README section 7).
+  fishbowl:
+    <<: *hardened
+    # The images are built from the GitHub repository (FB_SOURCE: a clone of it
+    # instead, for example FB_SOURCE=.), which also downloads the Fishbowl
+    # installer from the repository's release. `pull_policy: never` means Compose
+    # builds them when they're missing instead of looking on Docker Hub. (FB_IMAGE
+    # is for the weekly maintenance, which builds a candidate under its own tag
+    # first; leave it unset.)
+    image: ${FB_IMAGE:-fishbowl-server}
+    pull_policy: never
+    build:
+      context: ${FB_SOURCE:-https://github.com/cesiumskater/Docker_Testing.git#main}
+      target: server
+    # The images are x86-64. On a Mac with Apple Silicon this has Docker build
+    # and run them under emulation; on an x86-64 computer it changes nothing.
+    platform: linux/amd64
+    container_name: fishbowl
+    user: "1000:1000"
+    # A small init as process 1, so signals reach the supervisor and nothing is
+    # left as a zombie.
+    init: true
+    # Fishbowl Server needs time to shut down cleanly.
+    stop_grace_period: 3m
+    # No ports: Clients, integrated apps and browsers come in through the edge.
+    networks: [app, data]
+    volumes:
+      - fishbowl-app:/opt/Fishbowl
+      - fishbowl-data:/var/lib/fishbowl
+      - fishbowl-dbconf:/var/lib/fishbowl-dbconf
+      # Status, requests and sockets shared with the page and the desktop (RAM).
+      - fishbowl-ipc:/run/fishbowl
+    environment:
+      TZ: ${FB_TZ:-UTC}    # your time zone, for example America/Denver
+      # Fishbowl's Java programs go out through the egress proxy; the network
+      # has no other way out.
+      FISHBOWL_EGRESS_PROXY: egress:3128
+      # The page's address from your network, for fishbowl-link.
+      FISHBOWL_PAGE_URL: https://${FB_PUBLIC_HOST:-localhost}:${FB_HTTPS_PORT:-443}/
+      # MySQL is the db container; Fishbowl's MySQL tuning goes to it through
+      # fishbowl-dbconf (docker compose restart db after a Fishbowl upgrade).
+      FISHBOWL_DB_HOST: db
+      FISHBOWL_DB_ROOT_PASSWORD_FILE: /run/secrets/mysql_root
+      FISHBOWL_DB_CONF_DIR: /var/lib/fishbowl-dbconf
+      # Fishbowl's own updates (README, "Fishbowl's own updates"): off unless
+      # FB_NATIVE_UPDATES=1. With the backup container in place, Fishbowl's own
+      # container mode (no database backups of its own) comes with it.
+      FISHBOWL_NATIVE_UPDATES: ${FB_NATIVE_UPDATES:-0}
+      FISHBOWL_CONTAINERIZED: ${FB_NATIVE_UPDATES:-0}
+      # Fishbowl Server's heap, for example 6g. Empty: Server Administration's
+      # memory setting stands (8 GB from setup).
+      FISHBOWL_SERVER_XMX: ${FB_SERVER_XMX:-}
+    secrets: [mysql_root]
+    depends_on:
+      volume-init: { condition: service_completed_successfully }
+      db: { condition: service_started }
+    # The image can't be changed while it runs (updates come from rebuilds), and
+    # no capabilities at all: nothing in here starts as root.
+    tmpfs:
+      - /tmp:exec,mode=1777
+    pids_limit: 4096
+    # Optional memory cap, for example FB_MEM_LIMIT=12g in .env. 0 means no cap.
+    # Fishbowl Server alone may use 8 GB, so leave room above that.
+    mem_limit: ${FB_MEM_LIMIT:-0}
+
+  page:
+    <<: *hardened
+    image: fishbowl-page
+    pull_policy: never
+    build:
+      context: ${FB_SOURCE:-https://github.com/cesiumskater/Docker_Testing.git#main}
+      target: page
+    platform: linux/amd64
+    container_name: fishbowl-page
+    # Its own user, in Fishbowl's group (to read what Fishbowl Server publishes
+    # and to reach the windows' sockets).
+    user: "1001:1000"
+    init: true
+    # The edge is its only way in; it has no way out, and no route to MySQL.
+    networks: [app]
+    volumes:
+      - fishbowl-ipc:/run/fishbowl
+      # Two folders of fishbowl-data, nothing else: its access code, and the
+      # folder for .sql files uploaded for Server Administration's Restore tab.
+      - type: volume
+        source: fishbowl-data
+        target: /var/lib/fishbowl/page
+        volume: { subpath: page }
+      - type: volume
+        source: fishbowl-data
+        target: /var/lib/fishbowl/import
+        volume: { subpath: import }
+    environment:
+      TZ: ${FB_TZ:-UTC}
+      FISHBOWL_PAGE_URL: https://${FB_PUBLIC_HOST:-localhost}:${FB_HTTPS_PORT:-443}/
+    depends_on:
+      volume-init: { condition: service_completed_successfully }
+    tmpfs:
+      - /tmp:mode=1777
+    pids_limit: 256
+    mem_limit: 512m
+
+  desktop:
+    <<: *hardened
+    image: fishbowl-desktop
+    pull_policy: never
+    build:
+      context: ${FB_SOURCE:-https://github.com/cesiumskater/Docker_Testing.git#main}
+      target: desktop
+    platform: linux/amd64
+    container_name: fishbowl-desktop
+    user: "1000:1000"
+    init: true
+    # Windows close cleanly (Server Administration saves its settings).
+    stop_grace_period: 1m
+    # app: the Client reaches Fishbowl Server (fishbowl:2456) and the egress
+    # proxy. data: Server Administration reaches MySQL to create, back up and
+    # restore company databases.
+    networks: [app, data]
+    volumes:
+      - fishbowl-app:/opt/Fishbowl
+      - fishbowl-data:/var/lib/fishbowl
+      - fishbowl-ipc:/run/fishbowl
+    environment:
+      TZ: ${FB_TZ:-UTC}
+      FISHBOWL_DB_HOST: db
+      FISHBOWL_EGRESS_PROXY: egress:3128
+    depends_on:
+      volume-init: { condition: service_completed_successfully }
+    tmpfs:
+      - /tmp:exec,mode=1777
+    pids_limit: 2048
+    # Optional memory cap (FB_DESKTOP_MEM_LIMIT). Each window's Java may use up
+    # to 2 GB (the Client's setting), so leave room for both.
+    mem_limit: ${FB_DESKTOP_MEM_LIMIT:-0}
+
+  db:
+    <<: *hardened
+    image: fishbowl-db
+    pull_policy: never
+    build:
+      context: ${FB_SOURCE:-https://github.com/cesiumskater/Docker_Testing.git#main}
+      dockerfile: images/db/Dockerfile
+    container_name: fishbowl-db
+    # A small init as process 1 (MySQL's entrypoint runs a helper beside mysqld).
+    init: true
+    # MySQL needs time to shut down cleanly.
+    stop_grace_period: 2m
+    networks: [data]
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root
+      # Where root may sign in from: the data network, never anywhere (decision 3).
+      MYSQL_ROOT_HOST: ${FB_DATA_ROOT_HOST:-172.31.240.%}
+      TZ: ${FB_TZ:-UTC}
+    secrets: [mysql_root]
+    volumes:
+      # The same volume the single-container image uses (MySQL runs as uid 27 in
+      # both), so a site moves between the two with its data.
+      - fishbowl-mysql:/var/lib/mysql
+      - fishbowl-dbconf:/etc/mysql/fishbowl.d:ro
+    tmpfs:
+      - /var/run/mysqld:mode=1777
+      - /tmp:mode=1777
+    pids_limit: 512
+    mem_limit: ${FB_DB_MEM_LIMIT:-0}
+
+  backup:
+    <<: *hardened
+    image: fishbowl-backup
+    pull_policy: never
+    build:
+      context: ${FB_SOURCE:-https://github.com/cesiumskater/Docker_Testing.git#main}
+      dockerfile: images/backup/Dockerfile
+    container_name: fishbowl-backup
+    init: true
+    networks: [data]
+    environment:
+      FB_DB_HOST: db
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root
+      TZ: ${FB_TZ:-UTC}
+      FB_BACKUP_TIME: ${FB_BACKUP_TIME:-01:17}            # every day, in FB_TZ
+      FB_BACKUP_KEEP_DAILY: ${FB_BACKUP_KEEP_DAILY:-14}
+      FB_BACKUP_KEEP_WEEKLY: ${FB_BACKUP_KEEP_WEEKLY:-8}
+      FB_BACKUP_KEEP_MONTHLY: ${FB_BACKUP_KEEP_MONTHLY:-12}
+    secrets: [mysql_root]
+    volumes:
+      - fishbowl-backups:/backups
+      # Read-only: Fishbowl's settings files go into every backup set.
+      - fishbowl-app:/fishbowl-app:ro
+    tmpfs:
+      - /tmp
+    pids_limit: 128
+    mem_limit: 512m
+
+  edge:
+    <<: *hardened
+    image: fishbowl-edge
+    pull_policy: never
+    build:
+      context: ${FB_SOURCE:-https://github.com/cesiumskater/Docker_Testing.git#main}
+      dockerfile: images/edge/Dockerfile
+    container_name: fishbowl-edge
+    networks: [public, app]
+    ports:
+      - "${FB_LAN_IP:-0.0.0.0}:${FB_HTTPS_PORT:-443}:443"     # the Fishbowl page, HTTPS
+      - "127.0.0.1:${FB_PAGE_PORT:-6080}:6080"               # the Fishbowl page, this computer only
+    environment:
+      FB_PUBLIC_HOST: ${FB_PUBLIC_HOST:-localhost}
+      FB_TLS: ${FB_TLS:-internal}
+    volumes:
+      # Caddy's certificates, and its own certificate authority with FB_TLS=internal.
+      - fishbowl-edge:/data
+      # Your own certificate and key, with FB_TLS=/certs/tls.crt /certs/tls.key.
+      - ${FB_TLS_DIR:-./certs}:/certs:ro
+    tmpfs:
+      - /config
+      - /tmp
+    pids_limit: 256
+    mem_limit: 256m
+
+  edge-tcp:
+    <<: *hardened
+    image: fishbowl-edge-tcp
+    pull_policy: never
+    build:
+      context: ${FB_SOURCE:-https://github.com/cesiumskater/Docker_Testing.git#main}
+      dockerfile: images/edge-tcp/Dockerfile
+    container_name: fishbowl-edge-tcp
+    networks: [public, app]
+    # Fishbowl Clients and integrated apps, on FB_LAN_IP (default: every IPv4
+    # address of this computer). Keep 28192 to your network: it's plain TCP.
+    ports:
+      - "${FB_LAN_IP:-0.0.0.0}:${FB_CLIENT_PORT:-2456}:2456"     # Fishbowl Clients and the REST API
+      - "${FB_LAN_IP:-0.0.0.0}:${FB_API_PORT:-28192}:28192"      # Fishbowl's legacy API: integrated apps
+    environment:
+      # off: Clients reach Fishbowl Server as they always have. edge: the edge
+      # terminates TLS on 2456 with its certificate (Clients use Secure Connection).
+      FB_CLIENT_TLS: ${FB_CLIENT_TLS:-off}
+    pids_limit: 128
+    mem_limit: 128m
+
+  egress:
+    <<: *hardened
+    image: fishbowl-egress
+    pull_policy: never
+    build:
+      context: ${FB_SOURCE:-https://github.com/cesiumskater/Docker_Testing.git#main}
+      dockerfile: images/egress/Dockerfile
+    container_name: fishbowl-egress
+    networks: [app, outbound]
+    environment:
+      # More names to allow, for example an integration's servers (README).
+      FB_EGRESS_EXTRA: ${FB_EGRESS_EXTRA:-}
+      # host:port of your network's own proxy, if it requires one.
+      FB_EGRESS_UPSTREAM: ${FB_EGRESS_UPSTREAM:-}
+    tmpfs:
+      - /tmp
+    pids_limit: 256
+    mem_limit: 256m
+
+networks:
+  # Published ports live here (the edge only).
+  public: {}
+  # Fishbowl's own network: no route to anywhere outside it.
+  app:
+    internal: true
+  # The egress proxy's way to the internet.
+  outbound: {}
+  # MySQL's network: fishbowl, desktop, db and backup only (never the page), no
+  # route out, and a fixed range so root's sign-in can be limited to it
+  # (FB_DATA_ROOT_HOST).
+  data:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${FB_DATA_SUBNET:-172.31.240.0/24}
+
+# Every volume that holds something is created once, outside Compose (README,
+# "The Compose stack"):
+#   docker volume create fishbowl-mysql   (and the same for the five others)
+# so `docker compose down --volumes` can't delete them, and `docker run` uses the
+# same three data volumes.
 volumes:
+  # Status, requests and the windows' sockets, shared by fishbowl, page and
+  # desktop: in RAM, owned by Fishbowl's user and group, gone when they stop.
+  # Nothing to keep, so Compose manages it.
+  fishbowl-ipc:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=64m,uid=1000,gid=1000,mode=0770"
   fishbowl-mysql:
-    name: fishbowl-mysql
     external: true
   fishbowl-app:
-    name: fishbowl-app
     external: true
   fishbowl-data:
-    name: fishbowl-data
     external: true
+  fishbowl-backups:
+    external: true
+  fishbowl-dbconf:
+    external: true
+  fishbowl-edge:
+    external: true
+
+secrets:
+  # The MySQL root password (decision 3: the image's fixed one, or your own). One
+  # line, no other text. README, "The MySQL root password".
+  mysql_root:
+    file: ${FB_MYSQL_ROOT_PASSWORD_FILE:-./secrets/mysql-root-password.txt}

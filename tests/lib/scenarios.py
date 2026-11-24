@@ -89,8 +89,6 @@ class Box:
             args += ["-e", "FISHBOWL_AUTO_UPDATE=0"]   # the "update" checks turn it on; the others must not wait on dnf
         if not any(e.startswith("FISHBOWL_NETCHECK_DELAY=") for e in env):
             args += ["-e", "FISHBOWL_NETCHECK_DELAY=5"]   # the start-up network check, soon enough to look for it
-        if not any(e.startswith("FISHBOWL_LOG_STREAM=") for e in env):
-            args += ["-e", "FISHBOWL_LOG_STREAM=1"]   # as compose.yaml runs it: the secret checks then cover the copied logs too
         r = sh(*args, *self.volume_args, image or self.image, *command)
         expect(r.returncode == 0, "docker run failed: " + r.stderr.strip())
         self._page = None
@@ -445,15 +443,6 @@ def runtime(a):
         page.wait_state("running", 300)
     check("Stop and Start on the page", stop_start)
 
-    def server_cli():
-        r = box.exec("fishbowl-server", "stop", "--wait")
-        expect(r.returncode == 0 and box.state() == "paused", r.stdout[-300:] + r.stderr[-300:])
-        expect(not box.client_port_open(), "port 2456 still answers after fishbowl-server stop")
-        r = box.exec("fishbowl-server", "start", "--wait")
-        expect(r.returncode == 0 and box.state() == "running", r.stdout[-300:] + r.stderr[-300:])
-        expect(box.exec("fishbowl-server", "start").returncode == 0, "start on a running server should just say so")
-    check("fishbowl-server stop/start --wait (the same as the page's buttons)", server_cli)
-
     def foreign_requests():
         p2 = Page(f"http://127.0.0.1:{box.port + 1}")
         expect(p2.request("POST", "/api/server/stop", b"{}", {"X-Fishbowl": "1", "Content-Type": "application/json"})[0] == 401)
@@ -482,42 +471,12 @@ def runtime(a):
         expect(box.is_up() and box.sql("SELECT 1") == "1" and "Starting MySQL again" in box.logs())
     check("MySQL killed -> both started again in place", kill_mysql)
 
-    def watchdog_hang():
-        expect(box.exec("test", "-e", "/run/fishbowl/probe-ok").returncode == 0,
-               "the watchdog never armed: Fishbowl Server didn't answer probe.py on its client port (blueprint E3)")
-        before = box.exec("cat", "/run/fishbowl/fishbowl-server.pid").stdout.strip()
-        t0 = time.monotonic()
-        # Freeze Fishbowl Server's process group: its port still accepts connections, nothing answers.
-        box.exec("bash", "-c", "kill -STOP -- -$(cat /run/fishbowl/fishbowl-server.pid)")
-        now = before
-        while time.monotonic() - t0 < 120:
-            now = box.exec("cat", "/run/fishbowl/fishbowl-server.pid").stdout.strip()
-            if now and now != before:
-                break
-            time.sleep(1)
-        took = time.monotonic() - t0
-        expect(now and now != before, "Fishbowl Server was not started again within 120 s")
-        expect(took <= 60, f"the restart began {took:.0f} s after the freeze (limit 60)")
-        box.wait_state("running", 300)
-        expect("[watchdog]" in box.logs(), "no [watchdog] line in the container log")
-    check("watchdog: a frozen Fishbowl Server (port open, no answer) is ended and started again within a minute",
-          watchdog_hang)
-
-    def streamed_logs():
-        out = box.logs()
-        expect(re.search(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \[mysqld\] ", out, re.M), "no [mysqld] lines in docker logs")
-        expect(re.search(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \[fbserver\] ", out, re.M), "no [fbserver] lines in docker logs")
-    check("FISHBOWL_LOG_STREAM=1: Fishbowl Server's and MySQL's own lines reach docker logs, tagged and timestamped",
-          streamed_logs)
-
     # -- data survives a new container; an unclean stop doesn't block the next start
     box.sql("CREATE TABLE IF NOT EXISTS fbcheck.zz_fbcheck_marker (id INT PRIMARY KEY, v VARCHAR(40)); "
             "REPLACE INTO fbcheck.zz_fbcheck_marker VALUES (1,'kept');")
     before = box.sql("SELECT v FROM fbcheck.zz_fbcheck_marker; CHECKSUM TABLE fbcheck.part, fbcheck.sysuser;")
     box.remove()
-    # The recreated container also gets a scheduled backup a few minutes from now (TZ is UTC here).
-    sched_at = time.strftime("%H:%M", time.gmtime(time.time() + 420))
-    box.run(env=(f"FISHBOWL_BACKUP_TIME={sched_at}", "FISHBOWL_BACKUP_KEEP=2"))
+    box.run()
 
     def recreated():
         box.wait_state("running", 300)
@@ -617,36 +576,6 @@ def runtime(a):
         box.exec("bash", "-c", "rm -f /var/lib/fishbowl/backups/fbcheck-auto-*.sql.gz")
     check("fishbowl-backup without a terminal (the weekly maintenance): the image's password, the newest N kept",
           unattended_backup)
-
-    def backup_with_settings():
-        r = box.exec("fishbowl-backup", "--label", "fbcheck-set", "--keep", "1", "--with-settings")
-        expect(r.returncode == 0, r.stdout[-300:] + r.stderr[-300:])
-        path = r.stdout.strip().splitlines()[-1]
-        base = path[:-len(".sql.gz")]
-        names = box.exec("bash", "-c", f"ls -1 {base}.*").stdout.split()
-        expect(sorted(names) == sorted([path, base + ".settings.tar.gz", base + ".sha256"]), f"files: {names}")
-        expect(box.exec("fishbowl-backup", "--verify", path).returncode == 0, "--verify failed on a good backup")
-        inside = box.exec("tar", "-tzf", base + ".settings.tar.gz").stdout
-        expect("opt/Fishbowl/server/bin/eve.properties" in inside, inside)
-        expect(box.exec("stat", "-c", "%a", base + ".settings.tar.gz").stdout.strip() == "600", "settings archive isn't owner-only")
-        box.exec("bash", "-c", f"printf x >> {path}")
-        expect(box.exec("fishbowl-backup", "--verify", path).returncode != 0, "--verify passed a damaged backup")
-        box.exec("bash", "-c", "rm -f /var/lib/fishbowl/backups/fbcheck-set-*")
-    check("fishbowl-backup --with-settings: settings archive and checksums; --verify catches damage", backup_with_settings)
-
-    def scheduled():
-        deadline = time.time() + 480
-        while time.time() < deadline:
-            out = box.logs()
-            if "Scheduled backup" in out or "scheduled backup failed" in out:
-                break
-            time.sleep(10)
-        expect("Scheduled backup written" in out, "no scheduled backup in the log: " +
-               "\n".join(l for l in out.splitlines() if "cheduled" in l)[-400:])
-        expect(box.exec("fishbowl-healthcheck", "--backup-age", "1").returncode == 0, "last-scheduled-backup not recorded")
-        names = box.exec("bash", "-c", "ls -1 /var/lib/fishbowl/backups/scheduled-*").stdout.split()
-        expect(any(n.endswith(".sha256") for n in names) and any(n.endswith(".settings.tar.gz") for n in names), f"{names}")
-    check("the daily scheduled backup runs at FISHBOWL_BACKUP_TIME, with settings and checksums", scheduled)
 
     def restore_command():
         box.sql("UPDATE fbrestored.zz_fbcheck_marker SET v='changed' WHERE id=1;")
@@ -758,15 +687,13 @@ def update(a):
             calls = f.read()
         return r, calls
 
-    GOOD = "mysql8.4-server 8.4.13\ntemurin-21-jdk 21.0.14\n"
+    GOOD = "mysql-server 8.4.13\ntemurin-21-jdk 21.0.14\n"
 
     def normal():
         r, calls = run_script("mkdir -p /run/fishbowl /var/lib/fishbowl/logs; update-all.sh", STUB_CANDIDATES=GOOD)
         expect(r.returncode == 0, r.stdout[-300:] + r.stderr[-300:])
         expect("--exclude" not in calls, calls)
-        repo = sh("docker", "run", "--rm", "--entrypoint", "cat", image, "/etc/yum.repos.d/adoptium.repo").stdout
-        expect("enabled=1" in repo and "includepkgs=temurin-21-jdk temurin-21-jre" in repo,
-               "Java's repository is not switched on, or not limited to Temurin 21: " + repo[-300:])
+        expect("--enablerepo=adoptium-temurin-java-repository" in calls, "Java's repository was not switched on")
         expect("verify" in calls and "setcap -r /usr/libexec/mysqld" in calls, calls)
         expect("1 package(s) updated" in r.stdout, r.stdout[-300:])
         expect("autoremove" not in calls and "reboot" not in r.stdout.lower().replace("no reboot", ""), "it must not autoremove or mention a reboot")

@@ -29,7 +29,7 @@ backup_databases() {
   fi
   log "Backing up all MySQL databases to $out" >&2
   ( umask 077
-    MYSQL_PWD="${!pwvar}" mysqldump --protocol=tcp -h 127.0.0.1 -P 3306 -u root \
+    MYSQL_PWD="${!pwvar}" mysqldump --protocol=tcp -h "$DB_HOST" -P 3306 -u root \
       --all-databases --single-transaction --routines --events --triggers \
       --hex-blob --flush-privileges --set-gtid-purged=OFF --max-allowed-packet=1G | gzip -6 > "$out.part"
   ) || { rm -f "$out.part"; fail 1 "mysqldump failed; no backup was written and nothing was changed."; }

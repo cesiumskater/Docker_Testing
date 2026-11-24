@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
-# Docker HEALTHCHECK: healthy only when MySQL answers and Fishbowl Server answers
-# on its client port. The reason is printed for `docker inspect`.
-#
-# Once the watchdog has seen Fishbowl Server answer an HTTP request since its
-# start (/run/fishbowl/probe-ok), "answers" means exactly that (probe.py), so a
-# frozen Java process shows as unhealthy even though its port still accepts
-# connections. Before that, a TCP connection to the port is enough.
-#
-#   fishbowl-healthcheck --backup-age HOURS
-#       for alerting instead: exits 1 when the last scheduled backup is older
-#       than HOURS (or there is none yet), and prints its time.
+# Docker HEALTHCHECK: healthy only when MySQL answers and Fishbowl Server accepts
+# connections on its client port. The reason is printed for `docker inspect`.
 set -u
-if [ "${1:-}" = --backup-age ]; then
-  max="${2:-26}"
-  [[ "$max" =~ ^[0-9]+$ ]] || { echo "Usage: fishbowl-healthcheck --backup-age HOURS"; exit 2; }
-  last="$(head -n 1 /var/lib/fishbowl/state/last-scheduled-backup 2>/dev/null || true)"
-  if [ -z "$last" ]; then echo "No scheduled backup has finished yet"; exit 1; fi
-  age=$(( ( $(date -u +%s) - $(date -u -d "$last" +%s 2>/dev/null || echo 0) ) / 3600 ))
-  if [ "$age" -ge "$max" ]; then echo "The last scheduled backup is ${age} hours old ($last)"; exit 1; fi
-  echo "The last scheduled backup finished $last (${age} hours ago)"
-  exit 0
-fi
+case "${FISHBOWL_ROLE:-all}" in
+  page)
+    # The page container: its web server answers.
+    # The whole answer is read before hanging up, so the page never writes into
+    # a closed connection.
+    if timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/6080; printf "GET /login HTTP/1.0\r\n\r\n" >&3; IFS= read -r l <&3; cat <&3 >/dev/null; [[ "$l" == "HTTP/"*" 200"* ]]' 2>/dev/null; then
+      echo "The Fishbowl page answers on port 6080"; exit 0
+    fi
+    echo "The Fishbowl page isn't answering on port 6080"; exit 1 ;;
+  desktop)
+    # The desktop container: its loop has looked for requests in the last 30 s.
+    if [ -n "$(find /run/fishbowl/desktop-alive -mmin -0.5 2>/dev/null)" ]; then
+      echo "The desktop is taking window requests"; exit 0
+    fi
+    echo "The desktop's request loop isn't running"; exit 1 ;;
+esac
 status="$(cat /run/fishbowl/status 2>/dev/null || echo unknown)"
 if [ "$status" != running ]; then
   case "$status" in
@@ -40,19 +37,21 @@ if [ "$status" != running ]; then
   esac
   exit 1
 fi
-if ! mysqladmin --protocol=socket --socket=/var/lib/mysql/mysql.sock ping --silent >/dev/null 2>&1; then
+if [ -n "${FISHBOWL_DB_HOST:-}" ]; then
+  # MySQL in its own container (the Compose stack): it has its own health check;
+  # here it only has to answer.
+  if ! mysqladmin --protocol=tcp -h "$FISHBOWL_DB_HOST" -P 3306 --connect-timeout=3 ping --silent >/dev/null 2>&1; then
+    echo "The database container ($FISHBOWL_DB_HOST) is not answering"
+    exit 1
+  fi
+elif ! mysqladmin --protocol=socket --socket=/var/lib/mysql/mysql.sock ping --silent >/dev/null 2>&1; then
   echo "MySQL is not answering"
   exit 1
 fi
 port="$(python3 -I /usr/local/lib/fishbowl/props.py get /opt/Fishbowl/server/bin/eve.properties webPort 2>/dev/null || echo 2456)"
-if [ -e /run/fishbowl/probe-ok ]; then
-  if ! out="$(timeout 9 python3 -I /usr/local/lib/fishbowl/probe.py --port "$port" --timeout 6 2>&1)"; then
-    [ -n "$out" ] || out="Fishbowl Server did not answer on port $port"
-    echo "$out"
-    exit 1
-  fi
-elif ! timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$port" 2>/dev/null; then
-  echo "Fishbowl Server is not accepting connections on port $port"
+# An HTTP answer, not just a TCP connection: a hung Java still accepts those (E3).
+if ! timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"; printf "GET / HTTP/1.0\r\n\r\n" >&3; IFS= read -r l <&3; [[ "$l" == HTTP/* ]]' _ "$port" 2>/dev/null; then
+  echo "Fishbowl Server isn't answering HTTP on port $port"
   exit 1
 fi
 echo "MySQL and Fishbowl Server are up (client port $port)"

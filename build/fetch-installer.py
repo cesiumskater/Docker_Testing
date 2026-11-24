@@ -63,7 +63,7 @@ def pick_asset(release, repo, tag):
         others = ", ".join(a.get("name", "?") for a in release["assets"]) or "none"
         fail(f"No Fishbowl installer found on the {where}.\n"
              f"Expected exactly one asset named like {ASSET_PATTERN} "
-             f"(for example Fishbowl-2026.10.sh).\nAssets on the release: {others}\n\n"
+             f"(for example Fishbowl-2026.11.sh).\nAssets on the release: {others}\n\n"
              "Fix: upload the Fishbowl Linux installer to that release.")
     if len(matches) > 1:
         names = "\n  ".join(a["name"] for a in matches)
@@ -79,7 +79,7 @@ def pick_asset(release, repo, tag):
     m = VERSION_RE.fullmatch(asset["name"])
     if not m:
         fail(f"Can't read a version from the asset name '{asset['name']}'.\n"
-             "Name it Fishbowl-<version>.sh, for example Fishbowl-2026.10.sh "
+             "Name it Fishbowl-<version>.sh, for example Fishbowl-2026.11.sh "
              "(the name Fishbowl publishes it under).")
     return asset, m.group(1)
 

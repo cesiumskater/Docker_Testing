@@ -8,7 +8,7 @@ the clicking and typing.
 Positions are measured from the top-left corner of the window's blue header,
 which is found in a screenshot, so they don't depend on the screen size or on
 where the window manager put the window. They are those of Fishbowl 26.10's
-Server Administration; a later Fishbowl version may move things (the
+Server Administration, and still right in 26.11; a later Fishbowl version may move things (the
 screenshots each step saves show where a run went wrong).
 """
 import os

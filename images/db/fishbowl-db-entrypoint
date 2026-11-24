@@ -1,0 +1,53 @@
+#!/bin/bash
+# The database container's entrypoint (README, "The Compose stack"): MySQL's own
+# entrypoint does the work, and this adds one step at every start.
+#
+# Decision 3: root may sign in only from this container (localhost) and from the
+# data network (MYSQL_ROOT_HOST, for example 172.31.240.%), never from anywhere
+# ('%'). MySQL's entrypoint sets that up when it creates a data directory. A data
+# directory made by the single-container image has root@localhost only, so on
+# such a volume the data-network account is added here, with the password from
+# the secret file. A root@'%' account is removed.
+set -euo pipefail
+
+host="${MYSQL_ROOT_HOST:-}"
+case "$host" in
+  ""|"%") echo "fishbowl-db: MYSQL_ROOT_HOST must name the data network (for example 172.31.240.%), never %." >&2; exit 2 ;;
+  *[!0-9A-Za-z.%_/:-]*) echo "fishbowl-db: MYSQL_ROOT_HOST '$host' isn't a host or network pattern." >&2; exit 2 ;;
+esac
+
+ensure_root_host() {
+  local raw pw sock=/var/run/mysqld/mysqld.sock i
+  for i in $(seq 1 300); do
+    mysqladmin --socket="$sock" ping --silent >/dev/null 2>&1 && break
+    sleep 1
+  done
+  # Only once MySQL's own first-start setup is done (it restarts mysqld once).
+  sleep 5
+  for i in $(seq 1 120); do
+    mysqladmin --socket="$sock" ping --silent >/dev/null 2>&1 && break
+    sleep 1
+  done
+  IFS= read -r raw < "${MYSQL_ROOT_PASSWORD_FILE:?MYSQL_ROOT_PASSWORD_FILE is required}" || true
+  # The same password, escaped for a single-quoted SQL string.
+  pw="${raw//\\/\\\\}"; pw="${pw//\'/\'\'}"
+  local have
+  if ! have="$(MYSQL_PWD="$raw" mysql --socket="$sock" -uroot -N -B -e "SELECT COUNT(*) FROM mysql.user WHERE user = 'root' AND host = '$host'")"; then
+    echo "fishbowl-db: couldn't check root's accounts with the password in $MYSQL_ROOT_PASSWORD_FILE." \
+         "Fishbowl Server can sign in only if root@'$host' exists with that password." >&2
+    return 0
+  fi
+  if [ "$have" = 0 ]; then
+    MYSQL_PWD="$raw" mysql --socket="$sock" -uroot -N -B -e "
+      CREATE USER 'root'@'$host' IDENTIFIED BY '$pw';
+      GRANT ALL PRIVILEGES ON *.* TO 'root'@'$host' WITH GRANT OPTION;" &&
+      echo "fishbowl-db: added root@'$host' (a data directory from the single-container image)"
+  fi
+  MYSQL_PWD="$raw" mysql --socket="$sock" -uroot -N -B -e "
+    DROP USER IF EXISTS 'root'@'%';
+    SELECT CONCAT('fishbowl-db: root may sign in from: ', GROUP_CONCAT(host ORDER BY host SEPARATOR ', '))
+      FROM mysql.user WHERE user = 'root';"
+}
+
+ensure_root_host &
+exec /usr/local/bin/docker-entrypoint.sh "$@"

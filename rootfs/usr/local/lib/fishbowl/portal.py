@@ -39,7 +39,10 @@ PORT = 6080
 RUN = "/run/fishbowl"
 WEB = "/usr/local/share/fishbowl/web"
 NOVNC = "/usr/share/novnc"
-SPOOL = "/dev/shm/fishbowl-web"
+SPOOL = os.environ.get("FISHBOWL_SPOOL", "/dev/shm/fishbowl-web")   # /run/fishbowl/spool in the split stack
+# Who may read a request: root alone in the single container (0600); in the split
+# stack, Fishbowl's own containers, through its group (0640, FISHBOWL_SPOOL_MODE).
+SPOOL_MODE = 0o640 if os.environ.get("FISHBOWL_SPOOL_MODE") == "0640" else 0o600
 IMPORT = "/var/lib/fishbowl/import"
 CODE_FILE = RUN + "/web-code"
 INSTALLER_ENV = "/opt/fishbowl-installer/installer.env"
@@ -301,7 +304,7 @@ def spool_write(name, lines=()):
     """Leave a request for the entrypoint: written under a hidden name, then
     renamed, so the entrypoint never sees half a file."""
     tmp = os.path.join(SPOOL, ".%s.%s" % (name, secrets.token_hex(8)))
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, SPOOL_MODE)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         for line in lines:
             f.write(line + "\n")
@@ -454,8 +457,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         code = current_code()
         return bool(code) and hmac.compare_digest(self.cookie_value(), token_for(code))
 
+    def secure_flag(self):
+        """Behind the HTTPS edge (the Compose stack), the browser's connection is
+        encrypted even though this hop isn't: the cookie then never travels over
+        plain HTTP. Anyone who can send this header to the page directly is on
+        this computer already, and could only make their own cookie stricter."""
+        return "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
+
     def cookie_header(self, code):
-        return "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax" % (COOKIE, token_for(code), COOKIE_MAX_AGE)
+        return "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Lax%s" % (
+            COOKIE, token_for(code), COOKIE_MAX_AGE, self.secure_flag())
 
     def same_origin(self):
         """Browsers send Origin on every request that can change something; it has
@@ -565,7 +576,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.post_login()
             if path == "/logout":
                 self.close_connection = True
-                return self.redirect("/login", {"Set-Cookie": "%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax" % COOKIE})
+                return self.redirect("/login", {"Set-Cookie": "%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax%s" % (
+                    COOKIE, self.secure_flag())})
             if not self.may_change():
                 return None
             state = first_line(RUN + "/status")
@@ -768,6 +780,15 @@ class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
     request_queue_size = 64
+
+    def handle_error(self, request, client_address):
+        """A browser (or a health check) that hangs up in the middle of an answer
+        is routine, so it leaves nothing in the log; anything else leaves one
+        timestamped line instead of a multi-line traceback."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError, socket.timeout)):
+            return
+        log("error while answering a request: %s: %s" % (type(exc).__name__, exc))
 
 
 def main():

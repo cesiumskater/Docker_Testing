@@ -1,0 +1,12 @@
+# Eclipse Temurin (Java 21) for Enterprise Linux 9: Adoptium's own repository and
+# signing key, the same ones Fedora's adoptium-temurin-java-repository package
+# points the single-container image at. Used by the Compose stack's server and
+# desktop images (Dockerfile targets "server" and "desktop"). The JRE comes as a
+# package, so every image build's update step brings Java's fixes too.
+[adoptium]
+name=Adoptium (Eclipse Temurin)
+baseurl=https://packages.adoptium.net/artifactory/rpm/rhel/9/$basearch
+enabled=1
+gpgcheck=1
+repo_gpgcheck=0
+gpgkey=https://packages.adoptium.net/artifactory/api/gpg/key/public

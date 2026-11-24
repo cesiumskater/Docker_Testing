@@ -269,7 +269,7 @@ mysql_set_root_password() {
 mysql_verify() {
   local out version lctn mode
   out="$(mysql_root SETUP_PW -N -B -e 'SELECT VERSION(), @@GLOBAL.lower_case_table_names, @@GLOBAL.sql_mode')" ||
-    fail 1 "Could not log in to MySQL over TCP (127.0.0.1:3306) as root with the new password."
+    fail 1 "Could not log in to MySQL over TCP ($DB_HOST:3306) as root with $(db_external && echo "the password in ${FISHBOWL_DB_ROOT_PASSWORD_FILE:-the image}" || echo "the new password")."
   IFS=$'\t' read -r version lctn mode <<<"$out"
   log "MySQL reports version $version, lower_case_table_names=$lctn, sql_mode=$mode"
   [[ "$version" == 8.4.* ]] || fail 1 "MySQL reports version $version; Fishbowl needs 8.4.x. Stopping before the Fishbowl installer runs."
@@ -337,13 +337,21 @@ perform_install() {
   write_state setup.in-progress "$(_ts) $FISHBOWL_VERSION"
 
   SETUP_SECRETS="$(secret_dir)"
-  mysql_initialize
-  mysql_start
-  log "MySQL is up; setting its root password"
-  mysql_set_root_password
-  mysql_verify
-  log "Securing MySQL (no anonymous users, no remote root, no test database)"
-  mysql_secure
+  if db_external; then
+    # The database container made its own data directory (root's password from
+    # the Compose secret, root only from its data network); it just has to fit.
+    mysql_start
+    log "Checking the database container ($DB_HOST:3306)"
+    mysql_verify
+  else
+    mysql_initialize
+    mysql_start
+    log "MySQL is up; setting its root password"
+    mysql_set_root_password
+    mysql_verify
+    log "Securing MySQL (no anonymous users, no remote root, no test database)"
+    mysql_secure
+  fi
 
   log "Installing Fishbowl $FISHBOWL_APP_VERSION unattended (Server with Client, $FB_HOME); about a minute"
   seed_memory_settings
@@ -365,10 +373,15 @@ perform_install() {
   set_auto_updates_default
   fix_ownership
   apply_fishbowl_mycnf
-  mysql_stop
-  mysql_start
-  mysql_verify
-  mysql_stop
+  db_point_fishbowl
+  if db_external; then
+    mysql_verify   # its restart for Fishbowl's tuning: docker compose restart db (README)
+  else
+    mysql_stop
+    mysql_start
+    mysql_verify
+    mysql_stop
+  fi
 
   verify_memory_settings ||
     fail 1 "Fishbowl's memory settings did not come out as ${SERVER_MEMORY_MB} MB server / ${CLIENT_MEMORY_MB} MB client (details in the container log)."

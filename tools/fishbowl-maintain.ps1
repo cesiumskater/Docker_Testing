@@ -7,21 +7,25 @@
   Updates must not stall waiting for someone to run them, so a scheduled task runs this
   every week (README section 12, "Weekly maintenance"). In order:
 
-    1. Builds a new image with every package update published so far, tagged
-       fishbowl:candidate. The running container isn't touched, and a failed build
-       changes nothing.
+    1. Builds a new Fishbowl Server image with every package update published so
+       far, tagged fishbowl-server:candidate, and rebuilds the stack's other images
+       the same way (page, desktop, db, backup, edge, edge-tcp, egress; their current
+       images kept as :previous). The running containers aren't touched, and a
+       failed build changes nothing.
     2. If the container isn't running (stopped on purpose, say), the candidate becomes
        the image its next `docker compose up -d` uses, and that's all.
-    3. Backs up every MySQL database inside the running container
+    3. Backs up every MySQL database from the running fishbowl container
        (fishbowl-backup --label weekly-maintenance --keep 4). No backup, no change.
-    4. Keeps the image the container runs now as fishbowl:previous, makes the candidate
-       the fishbowl image, and recreates the container on the same volumes.
-    5. Waits until the container is back where it was: healthy if it was healthy before,
-       otherwise in the same state on the Fishbowl page, up to FB_MAINTAIN_TIMEOUT
-       seconds (default 1200).
-    6. If it doesn't get there, it saves the failed container's log next to compose.yaml,
-       tags the new image fishbowl:failed, puts fishbowl:previous back and recreates the
-       container again.
+    4. Keeps the image the container runs now as fishbowl-server:previous, makes the
+       candidate the fishbowl-server image, and recreates the containers on the same
+       volumes.
+    5. Waits until the container is back where it was (longer while Fishbowl applies
+       an update it downloaded itself): healthy if it was healthy before, otherwise in
+       the same state on the Fishbowl page, and every other container of the stack
+       healthy, up to FB_MAINTAIN_TIMEOUT seconds (default 1200).
+    6. If it doesn't get there, it saves the failed containers' logs next to
+       compose.yaml, tags the new images :failed, puts every :previous back and
+       recreates the containers again.
 
   It never runs during a first-time setup or a Fishbowl upgrade, and two runs never
   overlap. Everything it prints also goes to fishbowl-maintain.log in that folder.
@@ -49,7 +53,7 @@ $ErrorActionPreference = 'Continue'
 
 $Container = 'fishbowl'
 $Service = 'fishbowl'
-$Image = 'fishbowl'
+$Image = 'fishbowl-server'
 $Candidate = '{0}:candidate' -f $Image
 $Previous = '{0}:previous' -f $Image
 $Failed = '{0}:failed' -f $Image
@@ -61,9 +65,19 @@ $PullArgs = if ($env:FB_MAINTAIN_PULL -eq '0') { @() } else { @('--pull') }
 $script:Backup = '(none taken)'
 $script:BeforeHealth = ''
 $script:BeforeState = ''
+# The stack's other services and their images (README, "The Compose stack").
+# Only the ones in this compose.yaml are touched.
+$KnownHelpers = [ordered]@{
+  'page' = 'fishbowl-page'; 'desktop' = 'fishbowl-desktop'; 'db' = 'fishbowl-db'; 'backup' = 'fishbowl-backup'
+  'edge' = 'fishbowl-edge'; 'edge-tcp' = 'fishbowl-edge-tcp'; 'egress' = 'fishbowl-egress'
+}
+$script:Helpers = [ordered]@{}
 
+# Write-Host, not Write-Output: whatever a function writes to its output becomes
+# part of what it returns, so a message from Test-BackWhereItWas would turn its
+# $false into a value that counts as true. The transcript records host output too.
 function Say([string]$Text) {
-  Write-Output ('{0} [maintain] {1}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'), $Text)
+  Write-Host ('{0} [maintain] {1}' -f (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'), $Text)
 }
 function Stop-Run([int]$Code, [string]$Text) {
   Say ('STOPPED: ' + $Text)
@@ -86,11 +100,27 @@ function Get-PageState {
   return "$s".Trim()
 }
 function Remove-Candidate { & docker image rm $Candidate 2>$null | Out-Null }
+function Get-HelperHealth([string]$Svc) {
+  $h = & docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' ('fishbowl-' + $Svc) 2>$null
+  return "$h".Trim()
+}
+# $true when every helper container reports healthy.
+function Test-HelpersHealthy {
+  foreach ($svc in $script:Helpers.Keys) { if ((Get-HelperHealth $svc) -ne 'healthy') { return $false } }
+  return $true
+}
+# Puts every helper's :previous image back (after a failed build or start).
+function Restore-Helpers {
+  foreach ($img in $script:Helpers.Values) {
+    if (Get-ImageId ($img + ':previous')) { & docker tag ($img + ':previous') $img 2>$null | Out-Null }
+  }
+}
 
 # $true once the container is back where it was before; $false on a state that
 # won't fix itself, or after $Timeout seconds.
 function Test-BackWhereItWas {
-  $deadline = (Get-Date).AddSeconds($Timeout)
+  $startWait = Get-Date
+  $deadline = $startWait.AddSeconds($Timeout)
   $h = ''; $s = ''
   while ((Get-Date) -lt $deadline) {
     if (Test-Running) {
@@ -98,26 +128,35 @@ function Test-BackWhereItWas {
       if (@('server-failed', 'upgrade-interrupted', 'foreign-data', 'downgrade', 'no-volumes') -contains $s) {
         Say ("The container reports '{0}'." -f $s); return $false
       }
-      if ($h -eq 'healthy') { return $true }
-      if ($script:BeforeHealth -ne 'healthy' -and $s -ne '' -and $s -eq $script:BeforeState) { return $true }
+      # Fishbowl applies an update it downloaded as it starts: progress, not a
+      # failure. The clock starts again when it's done (at most 2 hours).
+      if ($s -eq 'updating' -and (Get-Date) -lt $startWait.AddSeconds(7200)) { $deadline = (Get-Date).AddSeconds($Timeout) }
+      if (Test-HelpersHealthy) {
+        if ($h -eq 'healthy') { return $true }
+        if ($script:BeforeHealth -ne 'healthy' -and $s -ne '' -and $s -eq $script:BeforeState) { return $true }
+      }
     }
     Start-Sleep -Seconds 10
   }
-  Say ("Not back after {0} seconds (health: {1}, state: {2})." -f $Timeout, $h, $s)
+  $hh = ($script:Helpers.Keys | ForEach-Object { Get-HelperHealth $_ }) -join ' '
+  Say ("Not back after {0} seconds (health: {1}, state: {2}; the others: {3})." -f $Timeout, $h, $s, $hh)
   return $false
 }
 
 function Invoke-RollBack([string]$Why) {
   $saved = 'fishbowl-maintain-failed-{0}.log' -f (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
-  & docker logs --tail 300 $Container *> $saved
-  Say ("The new image didn't come back ({0}). Its container's log is saved in {1}." -f $Why, (Join-Path (Get-Location).Path $saved))
+  & { & docker logs --tail 300 $Container
+      foreach ($svc in $script:Helpers.Keys) { ('==== fishbowl-' + $svc); & docker logs --tail 100 ('fishbowl-' + $svc) } } *> $saved
+  Say ("The new images didn't come back ({0}). The containers' logs are saved in {1}." -f $Why, (Join-Path (Get-Location).Path $saved))
   & docker tag $Image $Failed 2>$null | Out-Null
+  foreach ($img in $script:Helpers.Values) { & docker tag $img ($img + ':failed') 2>$null | Out-Null }
   & docker tag $Previous $Image
   if ($LASTEXITCODE -ne 0) {
     Stop-Run 3 ("Couldn't put {0} back. Your data is in the volumes; this run's backup: {1}. Follow README section 12, 'If something goes wrong'." -f $Previous, $script:Backup)
   }
-  Say 'Putting the previous image back and recreating the container.'
-  & docker compose up -d --force-recreate --no-build $Service
+  Restore-Helpers
+  Say 'Putting the previous images back and recreating the containers.'
+  & docker compose up -d --force-recreate --no-build
   if (Test-BackWhereItWas) {
     Say ("Rolled back: the previous image runs again. The new one is kept as {0} for a look." -f $Failed)
     exit 2
@@ -143,16 +182,32 @@ try {
   & docker compose version *> $null
   if ($LASTEXITCODE -ne 0) { Stop-Run 1 "Docker Compose isn't available: 'docker compose version' failed." }
 
-  # 1. Build. A new PACKAGES_REFRESH value makes Docker apply every package update
-  #    instead of reusing its cache; FB_IMAGE gives the build its own tag.
+  $services = & docker compose config --services 2>$null
+  if ($LASTEXITCODE -ne 0) { Stop-Run 1 "compose.yaml doesn't load ('docker compose config' failed); check it and .env." }
+  foreach ($svc in $KnownHelpers.Keys) {
+    if (@($services | ForEach-Object { "$_".Trim() }) -contains $svc) { $script:Helpers[$svc] = $KnownHelpers[$svc] }
+  }
+
+  # 1. Build, every image in one go (they share the installer download). A new
+  #    PACKAGES_REFRESH value makes Docker apply every package update instead of
+  #    reusing its cache; FB_IMAGE gives Fishbowl Server's image its own tag. The
+  #    other images keep their current versions as :previous first.
   $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
-  Say 'Building a new image with every package update published so far. This takes a while.'
+  foreach ($img in $script:Helpers.Values) {
+    $old = Get-ImageId $img
+    if ($old) { & docker tag $old ($img + ':previous') | Out-Null }
+  }
+  $svcArgs = @($Service) + @($script:Helpers.Keys)
+  Say ('Building new images with every package update published so far ({0}). This takes a while.' -f ($svcArgs -join ', '))
   $env:FB_IMAGE = $Candidate
-  & docker compose build @PullArgs --build-arg ('PACKAGES_REFRESH=' + $stamp) $Service
+  & docker compose build @PullArgs --build-arg ('PACKAGES_REFRESH=' + $stamp) @svcArgs
   $buildRc = $LASTEXITCODE
   Remove-Item Env:FB_IMAGE -ErrorAction SilentlyContinue
-  if ($buildRc -ne 0) { Remove-Candidate; Stop-Run 1 "The build failed (its output is above). Nothing changed; the container keeps its image." }
-  if (-not (Get-ImageId $Candidate)) { Stop-Run 1 ("The build reported success, but there's no {0} image." -f $Candidate) }
+  if ($buildRc -ne 0) {
+    Restore-Helpers; Remove-Candidate
+    Stop-Run 1 "A build failed (its output is above). Nothing changed; the containers keep their images."
+  }
+  if (-not (Get-ImageId $Candidate)) { Restore-Helpers; Stop-Run 1 ("The build reported success, but there's no {0} image." -f $Candidate) }
 
   # 2. Not running: no backup, no recreate; the next start uses the new image.
   if (-not (Test-Running)) {
@@ -160,14 +215,14 @@ try {
     if ($current) { & docker tag $current $Previous | Out-Null }
     & docker tag $Candidate $Image
     if ($LASTEXITCODE -eq 0) { Remove-Candidate }
-    Say "The container isn't running, so it was left alone. 'docker compose up -d' starts it on the new image."
+    Say "The container isn't running, so it was left alone. 'docker compose up -d' starts the stack on the new images."
     exit 0
   }
 
   $script:BeforeHealth = Get-Health
   $script:BeforeState = Get-PageState
-  if (@('setup', 'upgrading', 'starting-up', 'starting', 'stopping-server') -contains $script:BeforeState) {
-    Remove-Candidate
+  if (@('setup', 'upgrading', 'updating', 'starting-up', 'starting', 'stopping-server') -contains $script:BeforeState) {
+    Restore-Helpers; Remove-Candidate
     Stop-Run 1 ("Fishbowl is busy ({0}). Nothing changed; the next run tries again." -f $script:BeforeState)
   }
   Say ("Before: health '{0}', state '{1}'." -f $script:BeforeHealth, $script:BeforeState)
@@ -178,7 +233,7 @@ try {
   $rc = $LASTEXITCODE
   $out | ForEach-Object { Write-Output ('    ' + $_) }
   if ($rc -ne 0) {
-    Remove-Candidate
+    Restore-Helpers; Remove-Candidate
     if ($rc -eq 3) {
       Stop-Run 1 "This installation has a MySQL root password of its own, so an unattended backup can't run. Run this script by hand after 'docker exec -it fishbowl fishbowl-backup', or see README section 12."
     }
@@ -189,12 +244,12 @@ try {
   # 4. Swap and recreate on the same volumes.
   $runningImage = (& docker inspect --format '{{.Image}}' $Container).Trim()
   & docker tag $runningImage $Previous
-  if ($LASTEXITCODE -ne 0) { Remove-Candidate; Stop-Run 1 ("Couldn't keep the current image as {0}. Nothing changed." -f $Previous) }
+  if ($LASTEXITCODE -ne 0) { Restore-Helpers; Remove-Candidate; Stop-Run 1 ("Couldn't keep the current image as {0}. Nothing changed." -f $Previous) }
   & docker tag $Candidate $Image
-  if ($LASTEXITCODE -ne 0) { Remove-Candidate; Stop-Run 1 "Couldn't tag the new image. Nothing changed." }
+  if ($LASTEXITCODE -ne 0) { Restore-Helpers; Remove-Candidate; Stop-Run 1 "Couldn't tag the new image. Nothing changed." }
   Remove-Candidate
-  Say 'Recreating the container on the new image (same volumes).'
-  & docker compose up -d --force-recreate --no-build $Service
+  Say 'Recreating the containers on the new images (same volumes).'
+  & docker compose up -d --force-recreate --no-build
   if ($LASTEXITCODE -ne 0) { Invoke-RollBack 'docker compose up failed' }
 
   # 5. Back where it was?

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Put here by the Docker container in place of Fishbowl's own eve.sh (README,
+# "Fishbowl's own updates"). Fishbowl runs eve.sh to start Fishbowl Server again
+# after it updates itself. The original is a debugging launcher: it would start a
+# second Fishbowl Server outside the container's supervision, with a fixed 4 GB
+# heap and none of the container's settings. Here it only asks the container to
+# start Fishbowl Server the normal way, once Fishbowl's updater is done.
+: > /run/fishbowl/native/restart-requested 2>/dev/null
+exit 0

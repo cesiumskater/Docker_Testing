@@ -9,13 +9,27 @@
 # shellcheck source=/dev/null
 . /usr/local/lib/fishbowl/common.sh
 
-[ "$(id -u)" = 0 ] || fail 1 "Run it as root: docker exec <container> fishbowl-link"
+am_root || split_role || fail 1 "Run it as root: docker exec <container> fishbowl-link"
+[ -r "$WEB_CODE_RUN" ] || fail 1 "The Fishbowl page hasn't started yet (no access code in $RUN_DIR); try again in a moment."
+# links [path]: the link on this computer, and in the Compose stack the HTTPS one
+# for your network as well, each on its own line so either can be copied whole.
+links() {
+  local lan
+  lan="$(page_url_lan "${1:-}")"
+  if [ -n "$lan" ]; then
+    note "On this computer:  $(page_url "${1:-}")"
+    note "From your network: $lan"
+  else
+    page_url "${1:-}"
+  fi
+}
 case "${1:-}" in
-  "")           page_url ;;
-  admin|client) page_url "$1" ;;
+  "")           links ;;
+  admin|client) links "$1" ;;
   --new-code)
+    [ "$ROLE" = server ] && fail 1 "In the Compose stack the page container keeps the code: docker exec fishbowl-page fishbowl-link --new-code"
     web_code_init new
     note "New access code set. Browsers that were signed in need the new link:"
-    page_url ;;
+    links ;;
   *) fail 2 "usage: fishbowl-link [admin|client|--new-code]" ;;
 esac

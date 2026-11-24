@@ -14,11 +14,6 @@
 #   versions         print the Fishbowl, MySQL and Java versions in this image
 #   <command>        anything else runs as a command, e.g. bash
 #
-# Also, in the background: the daily scheduled backup (FISHBOWL_BACKUP_TIME), the
-# watchdog that restarts Fishbowl Server or MySQL when it stops answering
-# (FISHBOWL_WATCHDOG), and with FISHBOWL_LOG_STREAM=1 Fishbowl's and MySQL's own
-# logs copied into the container log.
-#
 # How the pieces talk: the page's server (portal.py, user fbweb) and the terminal
 # commands (fishbowl-setup, fishbowl-upgrade, fishbowl-admin) leave small request
 # files in /dev/shm/fishbowl-web. Every waiting loop here calls `tick`, which acts
@@ -29,8 +24,12 @@
 
 # A restarted container still has the status file of its last run, and the first
 # seconds after a cold boot are slow: replace it before doing anything else.
-case "${1:-run}" in
-  run|admin) mkdir -p /run/fishbowl && printf 'starting-up\n' > /run/fishbowl/status ;;
+# (Only the part that runs Fishbowl Server writes it: in the Compose stack the
+# page and the desktop share the folder and only read it.)
+case "${1:-run}/${FISHBOWL_ROLE:-all}" in
+  run/all|admin/all|run/server|admin/server)
+    mkdir -p /run/fishbowl &&
+      printf 'starting-up\n' > /run/fishbowl/status.tmp && mv -f /run/fishbowl/status.tmp /run/fishbowl/status ;;
 esac
 
 # shellcheck source=/dev/null
@@ -46,20 +45,13 @@ PORTAL_PID=""
 UPDATE_PID=""           # update-all.sh, started in the background at every start
 NETCHECK_PID=""         # fishbowl-netcheck --log, once, shortly after every start
 IMAGE_AGE_PID=""        # the daily check of how old the image's packages are
-LOGSTREAM_PID=""        # copies fbserver.log and mysqld.log into the container log (FISHBOWL_LOG_STREAM=1)
-SCHED_BACKUP_PID=""     # the daily scheduled backup (FISHBOWL_BACKUP_TIME)
-WATCHDOG_FAILS=0        # Fishbowl Server checks in a row that got no answer
-WATCHDOG_DB_FAILS=0     # MySQL pings in a row that got no answer
-WATCHDOG_ARMED=0        # 1 once Fishbowl Server has answered a check since its start
-WATCHDOG_NEXT=0         # $SECONDS of the next check
-SERVER_PORT=2456        # Fishbowl Server's client port, read at each start
 PORTAL_RESTARTS=0
 JOB_PID=""              # a setup or upgrade child in progress
 EXPECT_SETUP=0          # 1 while waiting for first-time setup answers
 UPGRADE_READY=0         # 1 when upgrade answers passed their checks and wait to run
 UPGRADE_INTERRUPTED=0   # 1 when an earlier upgrade stopped half-way
 SERVER_REQUEST=""       # stop | start | restart, asked for on the page
-NEXT=""                 # what run_services does next: start | pause | upgrade | interrupted | failed
+NEXT=""                 # what run_services does next: start | pause | upgrade | interrupted | failed | native
 START_FAILURE=""        # why Fishbowl Server did not start
 START_RETRY=0           # 1 when trying again by itself makes sense
 RECOVERIES=()           # when Fishbowl Server or MySQL last stopped without being asked
@@ -75,16 +67,22 @@ on_exit() {
     kill -TERM "$JOB_PID" 2>/dev/null
     wait "$JOB_PID" 2>/dev/null
   fi
-  sessions_stop_all
+  [ "$ROLE" = server ] || sessions_stop_all
+  if native_updater_running; then
+    log "Fishbowl's updater is applying an update; waiting for it before stopping (up to 150 s)."
+    for _ in $(seq 1 150); do native_updater_running || break; sleep 1; done
+    native_updater_running && warn "Fishbowl's updater was still running at the stop; Fishbowl Server may need the update again (README, \"Fishbowl's own updates\")."
+  fi
   fishbowl_stop
   mysql_stop
   system_update_stop
   netcheck_stop
   image_age_stop
-  backup_schedule_stop
   portal_stop
-  logstream_stop     # last, so the shutdown's own lines in Fishbowl's and MySQL's logs get through
-  rm -rf "$WEB_SPOOL"   # requests nobody will read now (they may hold answers)
+  # Requests nobody will read now (setup and upgrade answers may hold a License
+  # Key or a password). The split stack's page and desktop share the folder and
+  # keep their own requests.
+  if [ "$ROLE" = server ]; then rm -f "$WEB_SPOOL/setup" "$WEB_SPOOL/upgrade"; else rm -rf "$WEB_SPOOL"; fi
   set_status stopped
   exit "$rc"
 }
@@ -105,6 +103,9 @@ on_signal() {
 # starts again. FISHBOWL_AUTO_UPDATE=0 turns it off.
 system_update_start() {
   [ "${FISHBOWL_AUTO_UPDATE:-1}" != 0 ] || return 0
+  # The Compose stack's containers don't run as root, so they can't change
+  # packages: their updates come from the weekly rebuild alone.
+  am_root || return 0
   [ -x "$BIN_DIR/update-all.sh" ] || return 0
   # Its own session (so stopping it can reach dnf too), low priority, no input.
   setsid "$BIN_DIR/update-all.sh" --at-start </dev/null &
@@ -143,80 +144,6 @@ image_age_stop() {
   wait "$IMAGE_AGE_PID" 2>/dev/null || true
   IMAGE_AGE_PID=""
 }
-
-# ------------------------------------------------------------ log streaming --
-# FISHBOWL_LOG_STREAM=1 (compose.yaml sets it) copies Fishbowl Server's and
-# MySQL's own log files into the container's log, tagged [fbserver] and [mysqld],
-# with secrets blanked out (logstream.py). The files stay where they are.
-logstream_start() {
-  [ "${FISHBOWL_LOG_STREAM:-0}" = 1 ] || return 0
-  python3 -I -u "$LIB_DIR/logstream.py" "fbserver=$FB_SERVER_LOG" "mysqld=$LOG_DIR/mysqld.log" </dev/null &
-  LOGSTREAM_PID=$!
-}
-logstream_stop() {
-  [ -n "$LOGSTREAM_PID" ] || return 0
-  sleep 1   # let the last lines through
-  kill -TERM "$LOGSTREAM_PID" 2>/dev/null || true
-  wait "$LOGSTREAM_PID" 2>/dev/null || true
-  LOGSTREAM_PID=""
-}
-
-# --------------------------------------------------------- scheduled backups --
-# Every day at FISHBOWL_BACKUP_TIME (HH:MM in the container's time zone, TZ;
-# default 01:17), a consistent mysqldump of every database, Fishbowl's settings
-# files and SHA-256 checksums, through fishbowl-backup --label scheduled. Keeps
-# the newest FISHBOWL_BACKUP_KEEP (default 7). "off" turns it off. Writes one
-# line to the container log either way, and the time of the last good one to
-# $STATE_DIR/last-scheduled-backup (for alerts: fishbowl-healthcheck --backup-age).
-backup_time_valid() { [[ "$1" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; }
-seconds_until() {  # seconds_until HH:MM  (local time, today or tomorrow)
-  local now target
-  now="$(date +%s)"
-  target="$(date -d "today $1" +%s)"
-  [ "$target" -gt "$now" ] || target="$(date -d "tomorrow $1" +%s)"
-  printf '%s\n' "$(( target - now ))"
-}
-scheduled_backup() {
-  local keep="${FISHBOWL_BACKUP_KEEP:-7}" status out rc=0
-  [[ "$keep" =~ ^[1-9][0-9]{0,2}$ ]] || keep=7
-  setup_complete || return 0
-  status="$(current_status)"
-  case "$status" in
-    running|paused|awaiting-database|server-failed|starting|upgrade-interrupted) ;;
-    *) log "Scheduled backup skipped: Fishbowl is busy (status: $status); the next one is tomorrow."; return 0 ;;
-  esac
-  out="$(nice -n 10 "$BIN_DIR/fishbowl-backup" --label scheduled --keep "$keep" --with-settings </dev/null 2>&1)" || rc=$?
-  if [ "$rc" = 0 ]; then
-    write_state last-scheduled-backup "$(_ts)"
-    log "Scheduled backup written: $(printf '%s\n' "$out" | tail -n 1) (keeping the newest $keep)"
-  else
-    warn "The scheduled backup failed (exit status $rc): $(printf '%s\n' "$out" | grep -E '\[error\]' | tail -n 1 | sed 's/^.*\[error\] //')"
-  fi
-  return 0
-}
-backup_schedule_start() {
-  local t="${FISHBOWL_BACKUP_TIME-01:17}"
-  case "$t" in ""|off|OFF|0) log "Scheduled backups are off (FISHBOWL_BACKUP_TIME=${t:-empty})."; return 0 ;; esac
-  if ! backup_time_valid "$t"; then
-    warn "FISHBOWL_BACKUP_TIME=$t isn't a time like 01:17, so there are no scheduled backups. Fix it and recreate the container."
-    return 0
-  fi
-  ( trap 'exit 0' TERM
-    while :; do
-      sleep "$(seconds_until "$t")" & wait $!
-      scheduled_backup
-      sleep 90 & wait $!   # never twice in the same minute
-    done ) </dev/null &
-  SCHED_BACKUP_PID=$!
-}
-backup_schedule_stop() {
-  [ -n "$SCHED_BACKUP_PID" ] || return 0
-  pkill -TERM -f "$BIN_DIR/fishbowl-backup --label scheduled" 2>/dev/null || true
-  kill -TERM "$SCHED_BACKUP_PID" 2>/dev/null || true
-  wait "$SCHED_BACKUP_PID" 2>/dev/null || true
-  SCHED_BACKUP_PID=""
-}
-
 # Stopping the container: let a package that is half-installed finish, but not
 # for long (Docker gives the container 10 seconds unless it was started with
 # --stop-timeout, as the README's command does).
@@ -239,6 +166,7 @@ system_update_stop() {
 
 # ---------------------------------------------------------------- the page --
 portal_start() {
+  [ "$ROLE" = all ] || return 0   # the split stack has its own page container
   mkdir -p "$WEB_SPOOL"
   chown "$WEB_USER:$WEB_USER" "$WEB_SPOOL"
   chmod 0700 "$WEB_SPOOL"
@@ -326,10 +254,12 @@ handle_requests() {
     name="${f##*/}"
     case "$name" in
       open-admin|open-client)
+        [ "$ROLE" = server ] && continue   # the desktop container's
         geom="$(head -c 32 "$f" | tr -dc '0-9x' || true)"
         rm -f "$f"
         session_open "${name#open-}" "$geom" ;;
       close-admin|close-client)
+        [ "$ROLE" = server ] && continue
         rm -f "$f"
         session_close "${name#close-}" ;;
       server-stop|server-start|server-restart)
@@ -370,10 +300,13 @@ hold() {  # hold STATUS TEXT
 }
 
 # --------------------------------------------------------------- checks -----
+data_paths() {  # the folders that must be volumes (MySQL's only when it runs in here)
+  if db_external; then printf '%s\n' "$FB_HOME" "$DATA_DIR"; else printf '%s\n' "$MYSQL_DATA" "$FB_HOME" "$DATA_DIR"; fi
+}
 volumes_missing() {  # prints the paths that are not on volumes
   [ "${FISHBOWL_ALLOW_NO_VOLUMES:-0}" = 1 ] && return 0
   local p
-  for p in "$MYSQL_DATA" "$FB_HOME" "$DATA_DIR"; do
+  for p in $(data_paths); do
     mountpoint -q "$p" || printf '%s ' "$p"
   done
   return 0
@@ -396,7 +329,7 @@ no_volumes_text() {
 # easy to lose, so the page and the log say so.
 unnamed_volumes() {  # prints the data paths that sit on unnamed volumes
   local p n
-  for p in "$MYSQL_DATA" "$FB_HOME" "$DATA_DIR"; do
+  for p in $(data_paths); do
     n="$(volume_name_for "$p" "")"
     if [[ "$n" =~ ^[0-9a-f]{64}$ ]]; then printf '%s ' "$p"; fi
   done
@@ -423,8 +356,13 @@ unnamed_volumes_text() {
 
 clear_run_dir() {  # a restarted container keeps /run: drop what the last run left
   mkdir -p "$RUN_DIR"
-  rm -f "$RUN_DIR"/session-* "$MESSAGE_FILE" "$INFO_FILE" "$LAST_ERROR_FILE" "$PENDING_FLAG" "$WEB_CODE_RUN" \
-        "$RUN_DIR/fishbowl-server.pid" "$RUN_DIR/probe-ok"
+  if [ "$ROLE" = server ]; then
+    # Shared with the page and the desktop: only this container's own files.
+    rm -f "$MESSAGE_FILE" "$INFO_FILE" "$LAST_ERROR_FILE" "$PENDING_FLAG"
+    mkdir -p "$WEB_SPOOL" && chmod 2770 "$WEB_SPOOL" 2>/dev/null || true
+    return 0
+  fi
+  rm -f "$RUN_DIR"/session-* "$MESSAGE_FILE" "$INFO_FILE" "$LAST_ERROR_FILE" "$PENDING_FLAG" "$WEB_CODE_RUN"
   rm -rf "$X_DIR" "$WS_DIR"
   rm -f /tmp/.X1-lock /tmp/.X2-lock /tmp/.X11-unix/X1 /tmp/.X11-unix/X2
   # The Fishbowl Client's embedded browser leaves a profile folder per launch.
@@ -432,12 +370,15 @@ clear_run_dir() {  # a restarted container keeps /run: drop what the last run le
 }
 
 prepare_dirs() {
-  mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$LOG_DIR" "$HOMES_DIR" "$MYSQL_RUN"
+  mkdir -p "$STATE_DIR" "$BACKUP_DIR" "$LOG_DIR" "$HOMES_DIR"
   chmod 0700 "$STATE_DIR" "$BACKUP_DIR"
-  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$HOMES_DIR"
-  touch "$LOG_DIR/mysqld.log"
-  chown mysql:mysql "$LOG_DIR/mysqld.log"
-  chmod 0640 "$LOG_DIR/mysqld.log"
+  chmod 0755 "$DATA_DIR" "$LOG_DIR" "$HOMES_DIR" 2>/dev/null || true
+  if ! db_external; then
+    mkdir -p "$MYSQL_RUN"
+    touch "$LOG_DIR/mysqld.log"
+    chown mysql:mysql "$LOG_DIR/mysqld.log"
+    chmod 0640 "$LOG_DIR/mysqld.log"
+  fi
   prepare_import_dir
 }
 
@@ -544,11 +485,21 @@ check_version() {
   [ -n "$inst" ] || fail 1 "Setup is marked complete but $STATE_DIR/installed-version is missing."
   recorded="$(cat "$STATE_DIR/installed-app-version" 2>/dev/null || true)"
   actual="$(installed_app_version)"
-  if [ -n "$recorded" ] && [ -n "$actual" ] && [ "$recorded" != "$actual" ]; then
+  if [ -n "$recorded" ] && [ -n "$actual" ] && [ "$recorded" != "$actual" ] && ! native_updates_on; then
     warn "Fishbowl in $FB_HOME reports version $actual, but this container last installed $recorded."
-    warn "Fishbowl may have updated itself (Server Administration -> Server -> Auto Updates). Updates normally come from new images."
+    warn "Fishbowl may have updated itself (Server Administration -> Server -> Auto Updates). Updates normally come from new images, or set FISHBOWL_NATIVE_UPDATES=1."
   fi
   INFO_UPGRADE_TO=""; INFO_UPGRADE_BLOCKED=""; UPGRADE_INTERRUPTED=0
+  # With Fishbowl's own updates, what runs may be newer than this image's installer:
+  # that's not a downgrade (nothing of the image's is installed), and there's nothing to offer.
+  local running
+  running="$(running_app_version)"
+  if native_updates_on && [ -n "$running" ] && ! ver_gt "$FISHBOWL_APP_VERSION" "$running"; then
+    [ "$running" = "$FISHBOWL_APP_VERSION" ] ||
+      log "Fishbowl $running (updated by Fishbowl itself) is newer than this image's installer ($FISHBOWL_APP_VERSION); it runs as it is."
+    rm -f "$STATE_DIR/upgrade.in-progress"
+    return 0
+  fi
   if [ "$inst" = "$FISHBOWL_VERSION" ]; then
     rm -f "$STATE_DIR/upgrade.in-progress"
     return 0
@@ -556,7 +507,8 @@ check_version() {
   if ! ver_gt "$FISHBOWL_VERSION" "$inst"; then
     local text
     text="This image has Fishbowl $FISHBOWL_VERSION, which is older than the $inst installed in your volumes. Downgrades are refused: Fishbowl updates its database forward only. Use the image $(image_with_tag "$inst") or newer. Nothing was changed and nothing is started."
-    printf '\n%s [error] %s\n\n' "$(_ts)" "$text" >&2
+    if stamped; then printf '%s [error] %s\n' "$(_ts)" "$text" >&2
+    else printf '\n%s [error] %s\n\n' "$(_ts)" "$text" >&2; fi
     hold downgrade "$text"
   fi
   hr
@@ -636,7 +588,8 @@ run_upgrade_job() {
 # --------------------------------------------------------------- Fishbowl ---
 # Returns 0 when Fishbowl Server accepts connections; 1 (with START_FAILURE set,
 # and START_RETRY=1 when another try makes sense) when it could not start; 2 when
-# MySQL had to be started again meanwhile, so the start should simply be repeated.
+# MySQL had to be started again meanwhile, so the start should simply be repeated;
+# 3 when it quit to let Fishbowl's own updater apply an update (native_update_wait).
 # In every case the container keeps running.
 fishbowl_start() {
   local version port waited=0 next_note=300 reason xmx
@@ -644,21 +597,30 @@ fishbowl_start() {
   set_status starting
   START_FAILURE=""
   START_RETRY=0
+  native_prepare
+  strip_debug_agent
+  db_point_fishbowl
+  if native_update_pending; then
+    native_backup_first ||
+      warn "Fishbowl downloaded an update, but no backup could be taken before it is applied (reason above), so the update was set aside and Fishbowl Server starts on the version it has."
+    set_status starting
+  fi
   log "Starting Fishbowl Server ${version:-$FISHBOWL_APP_VERSION} (service launcher, user '$FB_USER')"
   FB_LOG_OFFSET="$(stat -c %s "$FB_SERVER_LOG" 2>/dev/null || echo 0)"
   cd "$FB_BIN"
-  setsid setpriv --reuid="$FB_USER" --regid="$FB_USER" --init-groups --inh-caps=-all -- \
+  drop_to "$FB_USER"
+  # Its console output (Fishbowl's own log lines, Java's warnings) goes to the
+  # container log as [fbserver] lines with UTC timestamps.
+  setsid "${DROP[@]}" \
     env -i PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" \
       HOME="$HOMES_DIR/$FB_USER" USER="$FB_USER" LOGNAME="$FB_USER" \
       LANG="${LANG:-C.UTF-8}" TZ="${TZ:-UTC}" JAVA_HOME="$JAVA21_HOME" \
       INSTALL4J_JAVA_HOME_OVERRIDE="$JAVA21_HOME" INSTALL4J_JAVA_HOME="$JAVA21_HOME" \
-      "$FB_SERVICE_LAUNCHER" run &
+      JAVA_TOOL_OPTIONS="$(java_proxy_opts)" FishbowlContainerized="$(containerized_value)" \
+      "$FB_SERVICE_LAUNCHER" run > >(log_tag fbserver) 2>&1 &
   FB_PID=$!
-  printf '%s\n' "$FB_PID" > "$RUN_DIR/fishbowl-server.pid"
   cd /
   port="$(client_port)"
-  SERVER_PORT="$port"
-  watchdog_reset
   # No time limit while the server is alive: after an upgrade (or with an older
   # database restored) it updates the database before it listens, and stopping
   # it half-way could damage the database.
@@ -666,19 +628,28 @@ fishbowl_start() {
     if ! kill -0 "$FB_PID" 2>/dev/null; then
       wait "$FB_PID" 2>/dev/null || true
       FB_PID=""
-      rm -f "$RUN_DIR/fishbowl-server.pid"
+      # Its loader found a downloaded update, started Fishbowl's updater and quit.
+      if native_updater_running || [ -f "$NATIVE_RESTART_FILE" ]; then return 3; fi
       START_FAILURE="Fishbowl Server exited while it was starting. Its own log has the reason: $FB_SERVER_LOG (docker exec <container> tail -n 50 $FB_SERVER_LOG). You can start it again here."
       START_RETRY=1
       warn "$START_FAILURE"
       return 1
     fi
-    if ! kill -0 "$MYSQLD_PID" 2>/dev/null; then
+    if db_external; then
+      mysql_check || return 2   # the database container went away: wait for it, start again
+    elif ! kill -0 "$MYSQLD_PID" 2>/dev/null; then
       mysql_check || true   # stops Fishbowl Server and starts MySQL again
       return 2
     fi
     if reason="$(db_update_refusal)"; then
       START_FAILURE="$(db_update_refused_text "$reason")"
       hr; note "$START_FAILURE"; hr
+      fishbowl_stop
+      return 1
+    fi
+    if reason="$(start_dialog_error)"; then
+      START_FAILURE="$reason Its log: $FB_SERVER_LOG (docker exec <container> tail -n 80 $FB_SERVER_LOG). You can start it again here."
+      warn "$START_FAILURE"
       fishbowl_stop
       return 1
     fi
@@ -710,6 +681,23 @@ db_update_refusal() {
   sleep 2   # let the reason line follow
   text="$(tail -c +"$((from + 1))" "$FB_SERVER_LOG" | grep -F -A1 -m1 "Unable to update your database" || true)"
   printf '%s\n' "$text" | sed -n 's/^[^)]*)[[:space:]]*- //p' | tail -n 1
+}
+
+# Fishbowl Server shows some start-up errors only in a dialog window. There's no
+# screen for it in a container, so the dialog fails (java.awt.HeadlessException in
+# its log) and the start hangs without ever listening. Prints the reason when that
+# happened since this start.
+start_dialog_error() {
+  [ -f "$FB_SERVER_LOG" ] || return 1
+  local from="$FB_LOG_OFFSET" text
+  [ "$(stat -c %s "$FB_SERVER_LOG")" -ge "$from" ] || from=0
+  text="$(tail -c +"$((from + 1))" "$FB_SERVER_LOG" | grep -A40 -m1 'java.awt.HeadlessException' || true)"
+  [ -n "$text" ] || return 1
+  if printf '%s\n' "$text" | grep -q 'ProcessingEngine.init'; then
+    printf '%s\n' "Fishbowl Server couldn't start its web server on port $(client_port): another program holds the port, or the web files it serves ($FB_HOME/webapp) are missing or unreadable. A Fishbowl update that didn't finish can leave them missing; an upgrade from the page puts them back."
+  else
+    printf '%s\n' "Fishbowl Server stopped at an error it could only show in a window, which a container can't display."
+  fi
 }
 
 db_update_refused_text() {
@@ -751,82 +739,6 @@ fishbowl_stop() {
   fi
   wait "$FB_PID" 2>/dev/null || true
   FB_PID=""
-  rm -f "$RUN_DIR/fishbowl-server.pid"
-}
-
-# ---------------------------------------------------------------- watchdog --
-# Docker restarts a container that exits, but never one that is merely unhealthy,
-# and a frozen Java process keeps its port open. So while Fishbowl Server runs,
-# the supervisor checks every FISHBOWL_WATCHDOG_INTERVAL seconds (default 5) that
-# it answers an HTTP request on its client port (probe.py) and that MySQL answers
-# a ping. After FISHBOWL_WATCHDOG_FAILURES (default 3) misses in a row it stops the
-# one that hangs and starts it again, like a crash: the same four-in-ten-minutes
-# guard applies. The Fishbowl check is armed only once Fishbowl Server has
-# answered it after a start, so a port that doesn't speak HTTP at all is never
-# mistaken for a hang. FISHBOWL_WATCHDOG=0 turns the watchdog off.
-watchdog_on() { [ "${FISHBOWL_WATCHDOG:-1}" != 0 ]; }
-watchdog_num() {  # watchdog_num VALUE DEFAULT MIN MAX
-  local v="$1"
-  if [[ "$v" =~ ^[0-9]+$ ]] && [ "$v" -ge "$3" ] && [ "$v" -le "$4" ]; then printf '%s\n' "$v"; else printf '%s\n' "$2"; fi
-}
-watchdog_reset() {
-  WATCHDOG_FAILS=0
-  WATCHDOG_DB_FAILS=0
-  WATCHDOG_ARMED=0
-  WATCHDOG_NEXT=0
-  rm -f "$RUN_DIR/probe-ok"
-}
-# Ends a Fishbowl Server that stopped answering: TERM to its whole process group
-# (the launcher and Java), 10 seconds, then KILL. A frozen process only ends with KILL.
-fishbowl_kill_hung() {
-  [ -n "${FB_PID:-}" ] || return 0
-  kill -TERM -- "-$FB_PID" 2>/dev/null || kill -TERM "$FB_PID" 2>/dev/null || true
-  kill -CONT -- "-$FB_PID" 2>/dev/null || true   # a stopped process can only act on TERM once it runs again
-  for _ in $(seq 1 10); do
-    kill -0 "$FB_PID" 2>/dev/null || break
-    sleep 1
-  done
-  kill -KILL -- "-$FB_PID" 2>/dev/null || true
-  kill -KILL "$FB_PID" 2>/dev/null || true
-  wait "$FB_PID" 2>/dev/null || true
-  FB_PID=""
-  rm -f "$RUN_DIR/fishbowl-server.pid"
-}
-# One round of checks. Returns 1 when it ended Fishbowl Server (the caller then
-# treats it as an unexpected stop); MySQL that hangs is ended here and started
-# again by mysql_check on the next turn.
-watchdog_check() {
-  local interval failures out
-  interval="$(watchdog_num "${FISHBOWL_WATCHDOG_INTERVAL:-5}" 5 2 300)"
-  failures="$(watchdog_num "${FISHBOWL_WATCHDOG_FAILURES:-3}" 3 2 100)"
-  [ "$SECONDS" -ge "$WATCHDOG_NEXT" ] || return 0
-  WATCHDOG_NEXT=$((SECONDS + interval))
-  if mysql_is_up; then
-    WATCHDOG_DB_FAILS=0
-  else
-    WATCHDOG_DB_FAILS=$((WATCHDOG_DB_FAILS + 1))
-    if [ "$WATCHDOG_DB_FAILS" -ge "$failures" ] && kill -0 "$MYSQLD_PID" 2>/dev/null; then
-      warn "[watchdog] MySQL is running but hasn't answered $failures pings in a row (${interval}s apart); ending it so it starts again."
-      kill -KILL "$MYSQLD_PID" 2>/dev/null || true
-      WATCHDOG_DB_FAILS=0
-      return 0
-    fi
-  fi
-  if out="$(timeout 15 python3 -I "$LIB_DIR/probe.py" --port "$SERVER_PORT" --timeout 5 2>&1)"; then
-    WATCHDOG_FAILS=0
-    if [ "$WATCHDOG_ARMED" = 0 ]; then
-      WATCHDOG_ARMED=1
-      : > "$RUN_DIR/probe-ok"
-      log "[watchdog] Fishbowl Server answers requests on port $SERVER_PORT; checking every ${interval}s"
-    fi
-    return 0
-  fi
-  [ "$WATCHDOG_ARMED" = 1 ] || return 0
-  WATCHDOG_FAILS=$((WATCHDOG_FAILS + 1))
-  [ "$WATCHDOG_FAILS" -ge "$failures" ] || return 0
-  warn "[watchdog] Fishbowl Server is running but hasn't answered $failures checks in a row (${interval}s apart; last: ${out:-no answer}). Ending it so it starts again."
-  fishbowl_kill_hung
-  return 1
 }
 
 # Fishbowl Server and MySQL are started again in place when they stop without
@@ -847,6 +759,7 @@ too_many_recoveries() {
 # returns 1 (so the caller can restart Fishbowl Server too). mysql_start ends the
 # container if MySQL can't come back; a restart policy then takes over.
 mysql_check() {
+  if db_external; then db_check_external; return; fi
   kill -0 "$MYSQLD_PID" 2>/dev/null && return 0
   wait "$MYSQLD_PID" 2>/dev/null || true
   MYSQLD_PID=""
@@ -861,10 +774,56 @@ mysql_check() {
   return 1
 }
 
+# MySQL in its own container restarted or stopped answering (crashed, being
+# updated): Fishbowl Server has lost its database connections and doesn't get new
+# ones by itself (tested: after MySQL came back, Client sign-ins failed with
+# "Socket error" from its pool). Stop it, wait for the database, and return 1 so
+# the caller starts Fishbowl Server again. Doesn't count towards the crash-loop
+# limit: the database container has its own restart policy.
+DB_SEEN_UP=0     # when the database container last answered (checked every 5 s at most)
+DB_CONN_ID=""    # the connection id it handed out then (db_conn_id)
+db_check_external() {
+  local now id
+  now=$(date +%s)
+  [ $((now - DB_SEEN_UP)) -lt 5 ] && return 0
+  id="$(db_conn_id || true)"
+  if [ -n "$id" ]; then
+    DB_SEEN_UP=$now
+    if [ -n "$DB_CONN_ID" ] && [ "$id" -le "$DB_CONN_ID" ]; then
+      DB_CONN_ID="$id"
+      if [ -n "${FB_PID:-}" ] && kill -0 "$FB_PID" 2>/dev/null; then
+        warn "The database container ($DB_HOST:3306) restarted between two checks; Fishbowl Server's database connections went with it."
+        fishbowl_stop
+      else
+        log "The database container ($DB_HOST:3306) restarted"
+      fi
+      return 1
+    fi
+    DB_CONN_ID="$id"
+    return 0
+  fi
+  if mysql_is_up; then DB_SEEN_UP=$now; return 0; fi
+  sleep 2
+  if mysql_is_up; then DB_SEEN_UP=$(date +%s); return 0; fi   # one missed answer isn't an outage
+  warn "The database container ($DB_HOST:3306) stopped answering; stopping Fishbowl Server until it's back."
+  fishbowl_stop
+  set_status starting "Waiting for the database container to answer again."
+  while ! mysql_is_up; do
+    handle_requests
+    SERVER_REQUEST=""
+    tick 2
+  done
+  log "The database container is answering again"
+  DB_SEEN_UP=$(date +%s)
+  DB_CONN_ID="$(db_conn_id || true)"
+  return 1
+}
+
 # No company database is selected: Fishbowl Server can't start. Waits until one
 # is (created or restored in Server Administration and selected there).
 await_database() {
   local told=0
+  db_point_fishbowl
   set_status awaiting-database
   hr
   note " Fishbowl is installed, but no company database is selected yet, so Fishbowl"
@@ -894,14 +853,121 @@ await_database() {
   return 0
 }
 
+# ------------------------------------------------ Fishbowl's own updates ---
+# A downloaded update package is applied by Fishbowl's updater as Fishbowl Server
+# starts. Back up every database first, once per package; without a backup the
+# package is set aside (updates/held-<time>/) and nothing is applied.
+native_backup_first() {
+  local stamp done_for out
+  stamp="$(native_update_zips | xargs -r -d '\n' stat -c '%n %s %Y' 2>/dev/null | sha256sum | cut -c1-16)"
+  done_for="$(cat "$STATE_DIR/native-backup-for" 2>/dev/null || true)"
+  [ "$stamp" = "$done_for" ] && return 0
+  log "Fishbowl downloaded an update ($(native_update_zips | xargs -r -d '\n' -n1 basename | tr '\n' ' ')) and applies it as it starts. Backing up every database first."
+  set_status updating "Backing up every database before Fishbowl applies the update it downloaded."
+  if out="$("$BIN_DIR/fishbowl-backup" --label pre-native-update --keep 4 </dev/null 2>&1)"; then
+    printf '%s\n' "$out" | sed 's/^/    /'
+    write_state native-backup-for "$stamp"
+    return 0
+  fi
+  printf '%s\n' "$out" | sed 's/^/    /' >&2
+  native_hold "no backup could be taken"
+  return 1
+}
+native_hold() {  # native_hold REASON: set the downloaded packages aside
+  local held
+  held="$FB_UPDATES_DIR/held-$(date -u +%Y%m%dT%H%M%SZ)"
+  mkdir -p "$held"
+  native_update_zips | while IFS= read -r z; do mv -f -- "$z" "$held/"; done
+  rm -f "$FB_APPLY_FILE"
+  chown -R "$FB_USER:$FB_USER" "$held"
+  warn "Fishbowl's update was set aside in $held ($1). Fishbowl Server keeps its version. To apply it: take a backup (docker exec -it <container> fishbowl-backup), move the .zip files back to $FB_UPDATES_DIR, and restart Fishbowl Server on the page."
+}
+
+# Fishbowl Server quit for its own updater: wait until the updater is done, make
+# sure no other Fishbowl Server started meanwhile, then start it the normal way.
+native_update_wait() {
+  local waited=0 from to pids limit="${FISHBOWL_NATIVE_UPDATE_TIMEOUT:-3600}"
+  from="$(running_app_version)"
+  set_status updating "Fishbowl's updater is applying an update. Fishbowl Server starts again by itself when it's done; don't stop the container meanwhile."
+  log "Fishbowl Server stopped for Fishbowl's own update; waiting for its updater to finish."
+  while native_updater_running; do
+    mysql_check || true
+    handle_requests
+    SERVER_REQUEST=""   # start/stop wait until the update is done
+    tick 2
+    waited=$((waited + 2))
+    if [ $((waited % 300)) = 0 ]; then log "Fishbowl's updater is still at work (${waited}s)."; fi
+    if [ "$waited" -ge "$limit" ]; then
+      warn "Fishbowl's updater has run for ${limit}s; Fishbowl Server isn't started while it runs. Its log: $FB_HOME/logs/update.log"
+      waited=0
+    fi
+  done
+  # The updater starts Fishbowl Server (eve.sh) as its last step and quits, so a
+  # second server may still be on its way up: look for a few seconds.
+  for _ in 1 2 3 4 5 6; do
+    pids="$(native_stray_servers)"
+    if [ -n "$pids" ]; then
+      warn "A Fishbowl Server started outside the container's supervision (Fishbowl's own eve.sh, brought back by the update); stopping it so the container starts its own."
+      # shellcheck disable=SC2086  # one PID per word
+      kill -TERM $pids 2>/dev/null || true
+      for _ in $(seq 1 60); do [ -z "$(native_stray_servers)" ] && break; sleep 1; done
+      pids="$(native_stray_servers)"
+      # shellcheck disable=SC2086
+      [ -z "$pids" ] || kill -KILL $pids 2>/dev/null || true
+    fi
+    sleep 1
+  done
+  rm -f "$NATIVE_RESTART_FILE"
+  to="$(running_app_version)"
+  if [ -n "$to" ] && [ "$from" != "$to" ]; then
+    log "Fishbowl updated itself: $from -> $to."
+    write_state installed-app-version "$(installed_app_version)"
+    write_state native-app-version "$to"
+    native_updates_on || warn "Fishbowl updates itself only with FISHBOWL_NATIVE_UPDATES=1 (README, \"Fishbowl's own updates\"); set Auto Updates to Never in Server Administration, or turn it on."
+  elif native_update_pending; then
+    # The packages are still there: the updater didn't apply them. Starting again
+    # would only run it again, so they're set aside.
+    native_hold "its updater ran but didn't apply them; see $FB_HOME/logs/update.log"
+  fi
+  NEXT=start
+}
+
 # Fishbowl Server is running: watch it, MySQL and the page until something is
 # asked for. Sets NEXT and stops Fishbowl Server before returning.
 supervise() {
-  local s
+  local s port wd_fails=0 wd_next
   set_status running
   publish_info
   SERVER_REQUEST=""
+  port="$(client_port)"
+  wd_next=$(( $(date +%s) + 5 ))
   while :; do
+    # The watchdog: every 5 s an HTTP request on the client port must get an
+    # answer within 5 s. A hung Java still accepts TCP connections (the kernel
+    # does that), so only a real answer counts (E3). Three misses in a row and
+    # Fishbowl Server is stopped (SIGTERM, then SIGKILL after 10 s) and started
+    # again; that counts towards the crash-loop limit like any unplanned stop.
+    if [ "${FISHBOWL_WATCHDOG:-1}" != 0 ] && [ "$(date +%s)" -ge "$wd_next" ]; then
+      if server_answers "$port"; then
+        wd_fails=0
+      else
+        wd_fails=$((wd_fails + 1))
+        wd_warn "Fishbowl Server didn't answer an HTTP request on port $port within 5 s ($wd_fails of 3)."
+        if [ "$wd_fails" -ge 3 ]; then
+          wd_warn "Fishbowl Server is hung; stopping it (SIGTERM, SIGKILL after 10 s) and starting it again."
+          watchdog_stop
+          if too_many_recoveries; then
+            START_FAILURE="Fishbowl Server hung or stopped four times within ten minutes, so it was not started again. Its own log has the reason: $FB_SERVER_LOG (docker exec <container> tail -n 80 $FB_SERVER_LOG). You can start it again here."
+            NEXT=failed
+          else
+            wd_log "Starting Fishbowl Server again"
+            NEXT=start
+          fi
+          return 0
+        fi
+      fi
+      wd_next=$(( $(date +%s) + 5 ))
+    fi
     if ! mysql_check; then
       log "Starting Fishbowl Server again after MySQL's restart"
       NEXT=start
@@ -910,19 +976,14 @@ supervise() {
     if ! kill -0 "$FB_PID" 2>/dev/null; then
       wait "$FB_PID" 2>/dev/null || true
       FB_PID=""
+      # It stopped to apply an update it downloaded, or its updater is at work.
+      if native_updater_running || [ -f "$NATIVE_RESTART_FILE" ] || native_update_pending; then
+        NEXT=native
+        return 0
+      fi
       warn "Fishbowl Server stopped unexpectedly (its log: $FB_SERVER_LOG)."
       if too_many_recoveries; then
         START_FAILURE="Fishbowl Server or MySQL stopped unexpectedly four times within ten minutes, so Fishbowl Server was not started again. Its own log has the reason: $FB_SERVER_LOG (docker exec <container> tail -n 50 $FB_SERVER_LOG). You can start it again here."
-        NEXT=failed
-      else
-        log "Starting Fishbowl Server again"
-        NEXT=start
-      fi
-      return 0
-    fi
-    if watchdog_on && ! watchdog_check; then
-      if too_many_recoveries; then
-        START_FAILURE="Fishbowl Server stopped answering, or stopped unexpectedly, four times within ten minutes, so it was not started again. Its own log has the reason: $FB_SERVER_LOG (docker exec <container> tail -n 50 $FB_SERVER_LOG). You can start it again here."
         NEXT=failed
       else
         log "Starting Fishbowl Server again"
@@ -940,7 +1001,9 @@ supervise() {
     SERVER_REQUEST=""
     sleep 1 &
     s=$!
-    wait -n "$MYSQLD_PID" "$FB_PID" "$s" 2>/dev/null || true
+    if [ -n "$MYSQLD_PID" ]; then wait -n "$MYSQLD_PID" "$FB_PID" "$s" 2>/dev/null || true
+    else wait -n "$FB_PID" "$s" 2>/dev/null || true
+    fi
   done
   if [ "$NEXT" = pause ]; then
     log "Fishbowl Server: stop requested on the Fishbowl page"
@@ -955,6 +1018,83 @@ supervise() {
   apply_pending_settings
   publish_info
   return 0
+}
+
+# --------------------------------------------------------------- watchdog ---
+wd_log()  { printf '%s [watchdog] %s\n' "$(_ts)" "$*"; }
+wd_warn() { printf '%s [watchdog] %s\n' "$(_ts)" "$*" >&2; }
+# server_answers PORT: an HTTP request on Fishbowl Server's client port gets a
+# status line back within 5 s (Jetty serves Fishbowl's web app there).
+server_answers() {
+  timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1" || exit 1
+    printf "GET / HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3
+    IFS= read -r line <&3 && [[ "$line" == HTTP/* ]]' _ "$1" 2>/dev/null
+}
+watchdog_stop() {
+  [ -n "${FB_PID:-}" ] || return 0
+  kill -TERM "$FB_PID" 2>/dev/null || true
+  for _ in $(seq 1 10); do kill -0 "$FB_PID" 2>/dev/null || break; sleep 1; done
+  if kill -0 "$FB_PID" 2>/dev/null; then
+    kill -KILL "$FB_PID" 2>/dev/null || true
+    # A Java frozen with SIGSTOP takes SIGKILL; anything it started goes too.
+    pkill -KILL -u "$FB_USER" -f '[-]ccom\.evnt\.eve\.Eve( |$)' 2>/dev/null || true
+  fi
+  wait "$FB_PID" 2>/dev/null || true
+  FB_PID=""
+}
+
+# ------------------------------------------------ the split stack's parts ---
+# The page container (FISHBOWL_ROLE=page): the Fishbowl page and nothing else, as
+# its own user. Its access code is kept in its own folder; the copy in
+# /run/fishbowl is readable by Fishbowl's group, for fishbowl-link.
+cmd_page() {
+  am_root && fail 1 "The page container doesn't run as root (compose.yaml sets its user)."
+  mkdir -p "$RUN_DIR" "$PAGE_DIR" 2>/dev/null || true
+  web_code_init
+  log "The Fishbowl page listens on port $WEB_PORT. Its links, with the access code: docker exec fishbowl fishbowl-link"
+  # Its requests (setup and upgrade answers among them) are read by Fishbowl's own
+  # containers, so they're readable by Fishbowl's group, in a folder only it can enter.
+  exec env -i PATH=/usr/bin:/bin LANG=C.UTF-8 TZ="${TZ:-UTC}" FISHBOWL_SPOOL="$WEB_SPOOL" FISHBOWL_SPOOL_MODE=0640 \
+    python3 -I "$LIB_DIR/portal.py"
+}
+
+# The desktop container (FISHBOWL_ROLE=desktop): Server Administration and the
+# Fishbowl Client, each on its own virtual screen, opened and closed when the
+# page asks (requests in the shared spool), as Fishbowl's user.
+cmd_desktop() {
+  local f name geom relay_pid=""
+  [ "$(id -u)" = "$(id -u "$FB_USER")" ] || fail 1 "The desktop container runs as Fishbowl's user (uid $(id -u "$FB_USER"))."
+  db_external || fail 1 "The desktop container needs FISHBOWL_DB_HOST, the database container (compose.yaml sets db)."
+  trap 'sessions_stop_all; [ -z "$relay_pid" ] || kill -TERM "$relay_pid" 2>/dev/null; exit 0' TERM INT HUP
+  mkdir -p "$RUN_DIR" "$WEB_SPOOL" 2>/dev/null || true
+  rm -f "$RUN_DIR"/session-*
+  rm -rf "$X_DIR" "$WS_DIR"
+  log "Server Administration and the Fishbowl Client open here when the Fishbowl page asks."
+  while :; do
+    # MySQL on localhost:3306 is the database container (db-relay.py), so Server
+    # Administration's new-database dialog and Restore tab work with Host
+    # "localhost", as in the single container.
+    if [ -z "$relay_pid" ] || ! kill -0 "$relay_pid" 2>/dev/null; then
+      [ -z "$relay_pid" ] || warn "The MySQL relay for Server Administration stopped; starting it again."
+      python3 -I "$LIB_DIR/db-relay.py" 127.0.0.1 3306 "$DB_HOST" 3306 &
+      relay_pid=$!
+    fi
+    : > "$HEARTBEAT_FILE"
+    for f in "$WEB_SPOOL"/open-admin "$WEB_SPOOL"/open-client "$WEB_SPOOL"/close-admin "$WEB_SPOOL"/close-client; do
+      { [ -f "$f" ] && [ ! -L "$f" ]; } || continue
+      name="${f##*/}"
+      case "$name" in
+        open-*)
+          geom="$(head -c 32 "$f" 2>/dev/null | tr -dc '0-9x' || true)"
+          rm -f "$f"
+          session_open "${name#open-}" "$geom" ;;
+        close-*)
+          rm -f "$f"
+          session_close "${name#close-}" ;;
+      esac
+    done
+    sleep 1 & wait $!
+  done
 }
 
 # Fishbowl Server is not running and stays that way until someone asks.
@@ -983,7 +1123,11 @@ run_services() {
   fix_ownership
   apply_fishbowl_mycnf
   mysql_start
-  log "MySQL is accepting connections ($(mysqld --version | grep -oE 'Ver [0-9.]+'))"
+  if db_external; then
+    log "The database container ($DB_HOST:3306) is accepting connections"
+  else
+    log "MySQL is accepting connections ($(mysqld --version | grep -oE 'Ver [0-9.]+'))"
+  fi
   if [ "$UPGRADE_INTERRUPTED" = 1 ]; then
     next=interrupted
   elif [ "$START_PAUSED" = 1 ]; then
@@ -996,7 +1140,6 @@ run_services() {
       start)
         apply_pending_settings
         sync_server_memory
-        apply_server_xmx
         publish_info
         if ! database_configured; then await_database; fi
         if [ "$NEXT" = start ]; then
@@ -1004,6 +1147,8 @@ run_services() {
           fishbowl_start || rc=$?
           if [ "$rc" = 0 ]; then
             supervise
+          elif [ "$rc" = 3 ]; then
+            NEXT=native
           elif [ "$rc" = 2 ]; then
             log "Starting Fishbowl Server again after MySQL's restart"
           elif [ "$START_RETRY" = 1 ] && ! too_many_recoveries; then
@@ -1022,6 +1167,8 @@ run_services() {
         wait_stopped upgrade-interrupted "$(upgrade_interrupted_text "$(installed_version)")" ;;
       upgrade)
         run_upgrade_job ;;
+      native)
+        native_update_wait ;;
     esac
     next="$NEXT"
   done
@@ -1030,7 +1177,16 @@ run_services() {
 # -------------------------------------------------------------- commands ----
 cmd_run() {
   local missing
-  [ "$(id -u)" = 0 ] || fail 1 "The container must start as root; it drops to the mysql, fishbowl and fbweb users itself."
+  # The Compose stack's containers: one timestamped line per event (see note).
+  if split_role; then export FISHBOWL_LOG_STAMPED=1; fi
+  case "$ROLE" in
+    page)    cmd_page; return ;;
+    desktop) cmd_desktop; return ;;
+    server)
+      [ "$(id -u)" = "$(id -u "$FB_USER")" ] || fail 1 "The server container runs as Fishbowl's user (uid $(id -u "$FB_USER")), not as $(id -un)."
+      db_external || fail 1 "The server container has no MySQL of its own: set FISHBOWL_DB_HOST to the database container (compose.yaml does: db)." ;;
+    *)       [ "$(id -u)" = 0 ] || fail 1 "The container must start as root; it drops to the mysql, fishbowl and fbweb users itself." ;;
+  esac
   set_status starting-up   # first of all: a restarted container still has the last run's status file
   clear_run_dir
   trap on_exit EXIT
@@ -1048,19 +1204,21 @@ cmd_run() {
 
   prepare_dirs
   acquire_lock
-  logstream_start
   if [ -n "$(unnamed_volumes)" ]; then
     INFO_VOLUMES=unnamed
     hr; unnamed_volumes_text; hr
   fi
-  web_code_init
+  [ "$ROLE" = server ] || web_code_init
   publish_info
   portal_start
-  print_page_link
+  if [ "$ROLE" = server ]; then
+    log "The Fishbowl page runs in its own container: docker exec fishbowl fishbowl-link prints its links."
+  else
+    print_page_link
+  fi
   system_update_start   # in the background; waits its turn behind setup and upgrades
   netcheck_start        # in the background; one warning line if Fishbowl's servers can't be reached
   image_age_start       # in the background; one warning line a day if the image's packages are too old
-  backup_schedule_start # in the background; a backup every day at FISHBOWL_BACKUP_TIME
 
   case "$(detect_state)" in
     # Settings changed in Server Administration (a purchased license, say) count
@@ -1100,7 +1258,7 @@ cmd_restore() {
   ask_root_password_until_valid || rc=$?
   [ "$rc" = 0 ] || exit 1
   log "Loading the backup (this can take a while)"
-  gzip -dc "$file" | MYSQL_PWD="$UPG_PW" mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u root --max-allowed-packet=1G ||
+  gzip -dc "$file" | MYSQL_PWD="$UPG_PW" mysql --protocol=tcp -h "$DB_HOST" -P 3306 -u root --max-allowed-packet=1G ||
     fail 1 "Loading the backup failed; see the MySQL error above."
   upgrade_cleanup
   log "Restore finished. Start the container normally."

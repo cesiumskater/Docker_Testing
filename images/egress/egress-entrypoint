@@ -1,0 +1,42 @@
+#!/bin/sh
+# Starts the egress proxy (Squid) in the foreground. Before it starts:
+#   FB_EGRESS_EXTRA     more names to allow, separated by spaces or commas, for
+#                       example an integration's servers. A leading dot allows a
+#                       name and everything under it (.intuit.com).
+#   FB_EGRESS_UPSTREAM  host:port of a proxy to send everything through, when your
+#                       network allows the internet only through its own proxy.
+# Both are checked; anything that isn't a host name (or host:port) stops the start
+# with a message, so a typo can't quietly widen or break the allowlist.
+set -eu
+
+die() { echo "egress: $*" >&2; exit 2; }
+dir=/tmp/egress
+mkdir -p "$dir"
+extra="$dir/extra-allowlist.txt"
+upstream="$dir/upstream.conf"
+
+: > "$extra"
+for name in $(printf '%s' "${FB_EGRESS_EXTRA:-}" | tr ',;' '  '); do
+  case "$name" in
+    *[!A-Za-z0-9.-]*|.|..*|*..*) die "FB_EGRESS_EXTRA: '$name' isn't a host name." ;;
+  esac
+  printf '%s\n' "$name" >> "$extra"
+done
+# Squid wants at least one entry; .invalid is a name that can never exist (RFC 2606).
+[ -s "$extra" ] || echo "fishbowl-egress.invalid" > "$extra"
+
+: > "$upstream"
+if [ -n "${FB_EGRESS_UPSTREAM:-}" ]; then
+  host="${FB_EGRESS_UPSTREAM%:*}"
+  port="${FB_EGRESS_UPSTREAM##*:}"
+  case "$host" in ""|*[!A-Za-z0-9.-]*) die "FB_EGRESS_UPSTREAM: '$FB_EGRESS_UPSTREAM' isn't host:port." ;; esac
+  case "$port" in ""|*[!0-9]*) die "FB_EGRESS_UPSTREAM: '$FB_EGRESS_UPSTREAM' isn't host:port." ;; esac
+  printf 'cache_peer %s parent %s 0 no-query no-digest no-netdb-exchange default name=upstream\nnever_direct allow all\n' \
+    "$host" "$port" > "$upstream"
+  echo "egress: sending everything through $host:$port"
+fi
+
+squid -k parse -f /etc/squid/squid.conf >/dev/null 2>"$dir/parse.log" ||
+  { cat "$dir/parse.log" >&2; die "squid.conf doesn't parse (above)."; }
+echo "egress: allowing $(grep -cv '^#' /etc/squid/fishbowl-allowlist.txt) Fishbowl names$( [ -n "${FB_EGRESS_EXTRA:-}" ] && printf ' plus %s' "$(tr '\n' ' ' < "$extra")")"
+exec squid -N -f /etc/squid/squid.conf

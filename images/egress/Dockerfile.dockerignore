@@ -1,0 +1,4 @@
+# This image needs only its own folder.
+*
+!images/egress/
+images/egress/Dockerfile*

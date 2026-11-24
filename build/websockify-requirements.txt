@@ -1,0 +1,9 @@
+# websockify for the Compose stack's desktop image (Dockerfile target "desktop").
+# AlmaLinux 9's EPEL has 0.11.0, which can't listen on a Unix socket
+# (--unix-listen arrived in 0.12.0), and the windows only listen on sockets.
+# This is the version Fedora 44 ships in the single-container image, pinned by
+# the SHA-256 of PyPI's wheel. It's installed without its optional extras
+# (numpy, requests, jwcrypto, redis): only token plugins use those.
+# To move to a newer version, replace both the version and the hash:
+#   pip download --no-deps --only-binary :all: websockify==X.Y.Z && sha256sum websockify-*.whl
+websockify==0.12.0 --hash=sha256:4443e363ba16077e8b62dbb0cfafa44b9ba8f49de5048f011769f006e0d686aa

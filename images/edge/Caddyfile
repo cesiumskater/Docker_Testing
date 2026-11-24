@@ -1,0 +1,77 @@
+# The edge's HTTPS side (README, "The HTTPS front door"). Caddy reads the {$...}
+# values from its environment, which compose.yaml fills from .env, before it
+# parses this file, so one value can hold several words (FB_TLS does).
+#
+#   https://FB_PUBLIC_HOST       the Fishbowl page, for your network (443 in here)
+#   http://localhost:6080        the Fishbowl page, for this computer only
+#   https://FB_PUBLIC_HOST:2456  Fishbowl Clients over TLS, used only when
+#                                FB_CLIENT_TLS=edge (edge-tcp sends 2456 here)
+#
+# FB_TLS picks where the certificate comes from:
+#   internal (default)          Caddy's own certificate authority, kept in the
+#                               fishbowl-edge volume. Browsers and Clients have to
+#                               trust its root certificate once (README).
+#   /certs/tls.crt /certs/tls.key
+#                               your own certificate and key, from FB_TLS_DIR
+#   you@example.com             a public certificate from Let's Encrypt; needs
+#                               FB_PUBLIC_HOST in public DNS and ports 80 and 443
+#                               reachable from the internet
+{
+	# Nothing reconfigures Caddy while it runs, so its admin API stays off, and
+	# there's no running configuration to save.
+	admin off
+	persist_config off
+	# Never try to add the internal root certificate to this container's trust store.
+	skip_install_trust
+	# Port 80 isn't published, so there's nothing to redirect from.
+	auto_https disable_redirects
+	# Clients that connect by IP address send no server name: give them this one.
+	default_sni {$FB_PUBLIC_HOST:localhost}
+	servers {
+		# HTTP/3 needs UDP 443, which isn't published; don't advertise it.
+		protocols h1 h2
+	}
+	# One JSON object per line on stdout, with UTC timestamps (docker logs).
+	log {
+		output stdout
+		format json {
+			time_format iso8601
+		}
+	}
+}
+
+# Shared by both ways in to the page. The page has its own container in the
+# stack (page:6080); FB_PAGE_UPSTREAM can point elsewhere, for example
+# fishbowl:6080 for a single container on the stack's network.
+(page) {
+	reverse_proxy {$FB_PAGE_UPSTREAM:page:6080}
+	header -Server
+	# The page sets its own security headers; these cover Caddy's own replies too.
+	header ?Referrer-Policy no-referrer
+	header ?X-Content-Type-Options nosniff
+}
+
+# The Fishbowl page over HTTPS, for your network.
+{$FB_PUBLIC_HOST:localhost} {
+	tls {$FB_TLS:internal}
+	import page
+}
+
+# The Fishbowl page on this computer (published on 127.0.0.1 only).
+http://:6080 {
+	import page
+}
+
+# Fishbowl Clients over TLS (FB_CLIENT_TLS=edge). Fishbowl Server itself speaks
+# plain HTTP on 2456; this terminates TLS with the edge's certificate.
+https://{$FB_PUBLIC_HOST:localhost}:2456 {
+	tls {$FB_TLS:internal}
+	reverse_proxy fishbowl:2456
+	header -Server
+}
+
+# For the health check only.
+http://:9180 {
+	bind 127.0.0.1
+	respond "ok" 200
+}

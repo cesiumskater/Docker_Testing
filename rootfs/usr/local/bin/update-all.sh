@@ -2,9 +2,11 @@
 #
 # update-all.sh (container edition)
 #
-# Brings the Fedora system inside the Fishbowl image up to date: the OS
-# packages, MySQL 8.4, Java 21 (Eclipse Temurin), the VNC and browser-window
-# pieces. Three ways it runs:
+# Brings the system inside a Fishbowl image up to date: the OS packages, MySQL
+# 8.4, Java 21 (Eclipse Temurin), the VNC and browser-window pieces. The single
+# container is Fedora (dnf); the Compose stack's images are UBI 9 (microdnf:
+# server, page) and AlmaLinux 9 (dnf: desktop), and each checks its own part
+# afterwards (FISHBOWL_VERIFY_PART, see verify-runtime.sh). Three ways it runs:
 #
 #   update-all.sh --build        in the Dockerfile, so every image build (the
 #                                weekly maintenance rebuild included) ships with
@@ -128,6 +130,20 @@ if [ "$AT_START" = 0 ] && [ "$BUILD" = 0 ] && root_read_only; then
     exit 1
 fi
 
+# The same check the image build runs, for this image's part of Fishbowl
+# (FISHBOWL_VERIFY_PART: all for the single container, or server, page, desktop).
+# Run with bash: a file uploaded through GitHub's web page loses its executable bit.
+run_verify() {
+    { [ "$CHANGED" -gt 0 ] || [ "$BUILD" = 1 ]; } || return 0
+    [ -f "$VERIFY" ] || return 0
+    echo ""
+    echo "Runtime check after the update:"
+    if ! bash "$VERIFY" "${FISHBOWL_VERIFY_PART:-all}"; then
+        RESULT="packages were updated but the runtime check FAILED; recreate the container from the image (docker rm, then docker run) to get back to the tested versions"
+        STATUS=2
+    fi
+}
+
 echo "Update run started: $(date)"
 RESULT="nothing to update"
 STATUS=0
@@ -143,26 +159,19 @@ if have dnf; then
     [ "$BUILD" = 1 ] && SKIP_UNAVAILABLE=False
     DNF=(dnf -y --setopt=install_weak_deps=False --setopt=skip_if_unavailable="$SKIP_UNAVAILABLE"
          --setopt=timeout=30 --setopt=retries=2)
-    # Eclipse Temurin (Java 21) comes from Adoptium's repository. The image's own
-    # repository file (/etc/yum.repos.d/adoptium.repo, written at build time) is
-    # switched on already. Fedora's adoptium-temurin-java-repository package, if
-    # something installed it, comes switched off: turn it on for this run so Java
-    # gets its fixes either way. (Fedora 45 keeps repository files in
-    # /usr/share/dnf5/repos.d as well as /etc/yum.repos.d.)
-    for repo_dir in /etc/yum.repos.d /usr/share/dnf5/repos.d; do
-        if [ -f "$repo_dir/adoptium-temurin-java-repository.repo" ]; then
-            DNF+=(--enablerepo=adoptium-temurin-java-repository)
-            break
-        fi
-    done
+    # Eclipse Temurin (Java 21) comes from Adoptium's repository, which is
+    # installed switched off; turn it on for this run so Java gets its fixes too.
+    if [ -f /etc/yum.repos.d/adoptium-temurin-java-repository.repo ]; then
+        DNF+=(--enablerepo=adoptium-temurin-java-repository)
+    fi
     RUNNER=(timeout "$TIMEOUT_SECS")
     have nice && RUNNER=(nice -n 19 "${RUNNER[@]}")
     have ionice && RUNNER=(ionice -c3 "${RUNNER[@]}")
 
     # Look first. Fishbowl Server needs MySQL 8.4.x and Java 21, so an update
     # that would change either one's major version is left out (everything else
-    # still updates). The image installs the versioned mysql8.4 packages and
-    # Adoptium's repository offers Temurin 21 only, so in practice this stays quiet.
+    # still updates). Fedora keeps MySQL 8.4 and Temurin 21 on those versions,
+    # so in practice this stays quiet.
     EXCLUDES=()
     CANDIDATES="$("${DNF[@]}" -q repoquery --upgrades --latest-limit=1 --queryformat '%{name} %{version}\n')"
     REPO_RC=$?
@@ -175,7 +184,7 @@ if have dnf; then
         while read -r name version; do
             [ -n "${name:-}" ] || continue
             case "$name" in
-                mysql|mysql-*|mysql8.4|mysql8.4-*|community-mysql*)
+                mysql|mysql-*|community-mysql*)
                     if [[ "$version" != 8.4.* ]]; then EXCLUDES+=("--exclude=mysql*" "--exclude=community-mysql*"); echo "Skipping MySQL packages: $name $version is not 8.4.x"; fi ;;
                 temurin-*)
                     if [[ "$version" != 21.* ]]; then EXCLUDES+=("--exclude=temurin-*"); echo "Skipping Java packages: $name $version is not Java 21"; fi ;;
@@ -207,19 +216,35 @@ if have dnf; then
         if { [ "$CHANGED" -gt 0 ] || [ "$BUILD" = 1 ]; } && [ -e /usr/libexec/mysqld ] && have setcap; then
             setcap -r /usr/libexec/mysqld 2>/dev/null || true
         fi
-        # The same check the image build runs: MySQL 8.4.x, Java 21, the browser-window pieces.
-        # (Run with bash: a file uploaded through GitHub's web page loses its executable bit.)
-        if { [ "$CHANGED" -gt 0 ] || [ "$BUILD" = 1 ]; } && [ -f "$VERIFY" ]; then
-            echo ""
-            echo "Runtime check after the update:"
-            if bash "$VERIFY"; then
-                :
-            else
-                RESULT="packages were updated but the runtime check FAILED; recreate the container from the image (docker rm, then docker run) to get back to the tested versions"
-                STATUS=2
-            fi
-        fi
+        run_verify
     fi
+elif have microdnf; then
+    # The Compose stack's UBI 9 images (server, page) have microdnf instead of dnf.
+    # Java there is the temurin-21-jre package, which never moves off Java 21, and
+    # MySQL isn't a package at all (its client tools come from the MySQL image),
+    # so there's nothing to hold back. A repository that can't be read fails the
+    # update, so a build stops instead of shipping unpatched.
+    RUNNER=(timeout "$TIMEOUT_SECS")
+    have nice && RUNNER=(nice -n 19 "${RUNNER[@]}")
+    PKG_BEFORE="$(mktemp)"; PKG_AFTER="$(mktemp)"
+    rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > "$PKG_BEFORE"
+    "${RUNNER[@]}" microdnf -y --setopt=install_weak_deps=0 --nodocs upgrade </dev/null
+    DNF_RC=$?
+    rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\n' | sort > "$PKG_AFTER"
+    CHANGED="$(comm -13 "$PKG_BEFORE" "$PKG_AFTER" | wc -l)"
+    if [ "$DNF_RC" != 0 ]; then
+        echo "microdnf finished with status $DNF_RC (offline, or a repository is down)."
+        RESULT="microdnf failed (status $DNF_RC), $CHANGED package(s) changed before it stopped"
+        STATUS=1
+    elif [ "$CHANGED" -gt 0 ]; then
+        RESULT="$CHANGED package(s) updated"
+    fi
+    if [ "$CHANGED" -gt 0 ]; then
+        echo "Updated packages:"
+        comm -13 "$PKG_BEFORE" "$PKG_AFTER" | sed 's/^/  /'
+    fi
+    microdnf clean all >/dev/null 2>&1 || true
+    [ "$DNF_RC" = 0 ] && run_verify
 else
     echo "dnf not found, skipping."
 fi

@@ -16,14 +16,7 @@ page**, where you do everything else in your browser:
   Fishbowl version
 
 The container starts by itself whenever Docker starts and never stops to wait
-for a terminal: whatever still needs you waits on the page. It also looks after
-itself: a Fishbowl Server or MySQL that crashes or stops answering is started
-again within about a minute, every database is backed up every night, and the
-image rebuilds with every package update once a week.
-
-The base is **Fedora Linux 45**. Where this is heading (separate containers for
-MySQL and Fishbowl Server, an HTTPS front door, an enterprise base image) and how
-each step gets proven is in [docs/container-blueprint.md](docs/container-blueprint.md).
+for a terminal: whatever still needs you waits on the page.
 
 Repository: **https://github.com/cesiumskater/Docker_Testing**
 
@@ -91,60 +84,13 @@ Windows name like *Mountain Standard Time* doesn't work here.
 
 ### With Docker Compose instead of `docker run`
 
-`compose.yaml` holds the same settings. Keep it in a folder of its own and run
-Compose from that folder; it builds the image from GitHub too, if it isn't
-there yet.
-
-**Linux and macOS**
-
-```bash
-mkdir -p ~/fishbowl
-cd ~/fishbowl
-curl -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/compose.yaml
-curl -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/.env.example
-curl -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/tools/fishbowl-maintain.sh
-cp .env.example .env
-docker volume create fishbowl-mysql
-docker volume create fishbowl-app
-docker volume create fishbowl-data
-docker compose up -d
-docker exec fishbowl fishbowl-link
-```
-
-**Windows (PowerShell)**
-
-```powershell
-New-Item -ItemType Directory -Force "$HOME\fishbowl" | Out-Null
-cd "$HOME\fishbowl"
-curl.exe -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/compose.yaml
-curl.exe -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/.env.example
-curl.exe -fsSLO https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/tools/fishbowl-maintain.ps1
-Copy-Item .env.example .env
-docker volume create fishbowl-mysql
-docker volume create fishbowl-app
-docker volume create fishbowl-data
-docker compose up -d
-docker exec fishbowl fishbowl-link
-```
-
-`.env` holds this site's settings: your time zone (`FB_TZ`; the example says
-`America/Denver`, so change it to yours), the address Fishbowl Clients use
-(`FB_LAN_IP`), the ports, Fishbowl Server's memory (`FB_SERVER_XMX`) and the time
-of the nightly backup (`FB_BACKUP_TIME`); the full list is in
-[Compose settings](#compose-settings-env). Change it with any text editor and run
-`docker compose up -d` again; the data stays on the volumes. Then set up the
-weekly maintenance once, with the script you just downloaded:
-[Weekly maintenance](#weekly-maintenance-set-it-up-once).
-
-The three `docker volume create` lines are needed once: `compose.yaml` treats the
-volumes as *external*, so Compose never creates or deletes them, and `docker
-compose down -v` can't take your data. If you already ran this container, the
-volumes exist and the lines just print their names.
-
-Pick either `docker run` or Compose for this container, not both: both want the
-name `fishbowl`. They use the same volumes, so switching is fine once the old
-container is gone (`docker compose down`, or `docker stop fishbowl` and then
-`docker rm fishbowl`).
+`compose.yaml` runs the layout for a server that runs for years: Fishbowl
+Server, the page, the windows, MySQL, a nightly backup, an HTTPS front door and
+an outbound allowlist, each in its own container, none of them running as root.
+It takes a few more steps than the single container (six volumes, the MySQL root
+password file, the name for the HTTPS certificate), all in [section
+13](#13-the-compose-stack). Both use the name `fishbowl` and the same three data
+volumes, so run one or the other; a site moves between them with its data.
 
 ## Contents
 
@@ -160,11 +106,12 @@ container is gone (`docker compose down`, or `docker stop fishbowl` and then
 10. [Day-to-day use](#10-day-to-day-use)
 11. [Backups and your data](#11-backups-and-your-data)
 12. [Updating to a new Fishbowl version](#12-updating-to-a-new-fishbowl-version), and the [weekly maintenance](#weekly-maintenance-set-it-up-once)
-13. [Security](#13-security)
-14. [Maintaining this repository](#14-maintaining-this-repository)
-15. [Reference](#15-reference)
-16. [Troubleshooting](#16-troubleshooting)
-17. [Versions and verification](#17-versions-and-verification)
+13. [The Compose stack](#13-the-compose-stack): several containers, none of them root, HTTPS, nightly backups
+14. [Security](#14-security)
+15. [Maintaining this repository](#15-maintaining-this-repository)
+16. [Reference](#16-reference)
+17. [Troubleshooting](#17-troubleshooting)
+18. [Versions and verification](#18-versions-and-verification)
 
 ---
 
@@ -173,7 +120,7 @@ container is gone (`docker compose down`, or `docker stop fishbowl` and then
 This repository builds a Docker image for running Fishbowl Advanced Server on
 Linux. It follows the knowledge article *Installing Fishbowl Advanced on Linux*
 (validated on Fedora 44 with MySQL 8.4.10 and Temurin JDK 21; called "the
-install guide" below) and adapts it to a container on Fedora 45.
+install guide" below) and adapts it to a container.
 **[MAINTAINER: link the article here if it's public.]**
 
 **Fishbowl does not support Linux.** Fishbowl's
@@ -191,9 +138,9 @@ running in this container, whatever system the container runs on.
 
 | Piece | Where it comes from | When |
 |---|---|---|
-| Fedora 45 base | `registry.fedoraproject.org/fedora:45` | image build |
-| MySQL 8.4.x | Fedora's `mysql8.4-server` package, pinned to `8.4.*` | image build |
-| Java 21 | Eclipse Temurin `temurin-21-jdk` from Adoptium's repository (the newest Adoptium tree published for Fedora 45 or an earlier release) | image build |
+| Fedora 44 base | `registry.fedoraproject.org/fedora:44` | image build |
+| MySQL 8.4.x | Fedora's `mysql-server` package, pinned to `8.4.*` | image build |
+| Java 21 | Eclipse Temurin `temurin-21-jdk` from Adoptium's repository | image build |
 | Fishbowl installer | the one `Fishbowl-*.sh` file on this repository's `fishbowl-installer` release | image build |
 | The Fishbowl page | a small web server in the container (`portal.py`), port 6080 | always running |
 | Browser windows | TigerVNC's `Xvnc` (a virtual screen that resizes with the browser tab), `openbox` (window manager), `websockify` and the noVNC viewer, all from Fedora | while a window is open |
@@ -201,25 +148,13 @@ running in this container, whatever system the container runs on.
 | Company database | restored or created in Fishbowl Server Administration | after setup |
 | System updates | every package update published so far, applied inside the build; the weekly maintenance rebuilds | image build, weekly |
 
-**Why Fedora with Fedora's MySQL and Temurin?** Fedora is the distribution the
-install guide lab-tested (on Fedora 44; it marks the others as tested
-conceptually), with exactly these packages. The official `mysql:8.4` and
-`eclipse-temurin:21` images would pin versions just as well, but neither the guide
-nor this repository tested them with Fishbowl. Whatever the source, the image
-build **fails** unless `mysqld` reports 8.4.x and Java reports 21 (per the guide,
-Fishbowl rejects MySQL 9.x and MariaDB, and its installer accepts only Java 21).
-
-**Fedora 45, and what changed from 44.** Fedora 45 came out on 3 November 2026.
-Its plain `mysql-server` package is now MySQL 9.7, which Fishbowl rejects, so the
-image installs Fedora's versioned `mysql8.4-server` and `mysql8.4` packages
-instead; they stay on 8.4. Adoptium publishes Temurin for each Fedora release
-separately and sometimes weeks late (Fedora 45's wasn't there at release), so the
-build picks the newest Adoptium tree that exists, Fedora 45's or an earlier one;
-the build log says which. Each Fedora release gets updates for about 13 months,
-so the image moves to the next release twice a year ([section
-14](#moving-to-a-new-fedora-release)). **The Fedora 45 image hasn't been through
-the acceptance checks yet** (see [section 17](#17-versions-and-verification)):
-run them before you replace a Fedora 44 image in production.
+**Why Fedora 44 with Fedora's MySQL and Temurin?** Fedora is the distribution
+the install guide lab-tested (it marks the others as tested conceptually), with
+exactly these packages. The official `mysql:8.4` and `eclipse-temurin:21` images
+would pin versions just as well, but neither the guide nor this repository
+tested them with Fishbowl. Whatever the source, the image build **fails** unless
+`mysqld` reports 8.4.x and Java reports 21 (per the guide, Fishbowl rejects
+MySQL 9.x and MariaDB, and its installer accepts only Java 21).
 
 ## 2. Requirements
 
@@ -230,9 +165,9 @@ run them before you replace a Fedora 44 image in production.
 | CPU | x86-64 (`linux/amd64`). On a Mac with Apple Silicon, Docker Desktop runs the image under emulation (slower, and untested here); turn on **Use Rosetta for x86_64/amd64 emulation on Apple Silicon** in Docker Desktop's **General** settings for the faster kind. Running natively on ARM64 is untested, and so is Windows on ARM. |
 | Internet | To build: access to GitHub, Fedora's package mirrors and Adoptium's repository. |
 | Browser | A current browser on the computer that runs Docker, for the Fishbowl page. Tested with headless Chromium. |
-| Disk | About **3.7 GB** for the image, about **1.2 GB** for a fresh install's volumes plus your databases and backups (seven nightly backups are kept, each a compressed copy of every database), and about **1.5 GB** of temporary space during install and upgrades. Plan on **10 GB free** plus room for the backups. |
+| Disk | About **3.7 GB** for the image, about **1.2 GB** for a fresh install's volumes plus your databases and backups, and about **1.5 GB** of temporary space during install and upgrades. Plan on **10 GB free**. |
 | RAM | Plan on **12 GB available to Docker** for Fishbowl Server and MySQL, plus about **2 GB** while the browser windows are open. Details below. |
-| Ports | **2456** reachable by Fishbowl Clients, **28192** by integrated apps and integrations on other computers, and **6080** on 127.0.0.1 for the Fishbowl page. All three must be free on the computer ([a port is already in use](#a-port-is-already-in-use)). |
+| Ports | **2456** reachable by Fishbowl Clients. **6080** on 127.0.0.1 for the Fishbowl page. Both must be free on the computer ([a port is already in use](#a-port-is-already-in-use)). |
 
 **Why 12 GB.** This is an estimate from the configured limits, not a
 measurement under load. Fishbowl Server is set to an **8192 MB** Java heap (as
@@ -303,7 +238,7 @@ reports, and stops with a clear message if the release has no installer or more
 than one. No credentials are needed while the repository is public.
 
 The second command gives the image a second name with its Fishbowl version
-(for example `fishbowl:2026.10`), so that version stays available after you
+(for example `fishbowl:2026.11`), so that version stays available after you
 build a newer one.
 
 The quotes around the address matter in zsh: without them, a zsh with the
@@ -322,7 +257,7 @@ docker compose build
 ### Or pull a ready-made image (only once it's published)
 
 If this repository's GitHub Actions workflow has published the image (see
-[Maintaining this repository](#14-maintaining-this-repository)), you can skip
+[Maintaining this repository](#15-maintaining-this-repository)), you can skip
 the build:
 
 ```sh
@@ -354,8 +289,8 @@ docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-tim
 docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096 fishbowl
 ```
 
-or `docker compose up -d` in the folder with `compose.yaml` (set `FB_TZ` in `.env`
-first; `.env.example` lists the settings).
+For the Compose stack instead (several containers, HTTPS, nightly backups), see
+[section 13](#13-the-compose-stack).
 
 | Option | Why |
 |---|---|
@@ -365,21 +300,13 @@ first; `.env.example` lists the settings).
 | `--stop-timeout 180` | Gives Fishbowl Server and MySQL up to 3 minutes to shut down cleanly. |
 | `-p 2456:2456` | Fishbowl Clients connect here. |
 | `-p 28192:28192` | Fishbowl's API ("Legacy Port"): integrated apps and integrations on other computers connect here. |
-| `-p 127.0.0.1:6080:6080` | The Fishbowl page, reachable from this computer only. See [Security](#13-security) before changing it. |
+| `-p 127.0.0.1:6080:6080` | The Fishbowl page, reachable from this computer only. See [Security](#14-security) before changing it. |
 | `-e TZ=…` | Your time zone, as a tz database name (Fishbowl and MySQL use it for dates). Defaults to UTC. |
 | the three `-v` | Your installation and data. They outlive the container: remove and recreate it any time. |
 | `--read-only` and the three `--tmpfs` | The image can't change while it runs; updates come from rebuilds ([section 12](#updates-to-the-system-inside-the-container-mysql-java-and-the-rest)). `/run`, `/tmp` and `/var/tmp` live in memory and start empty; everything that lasts is on the volumes. `/tmp` keeps the usual permission to run programs from it, as Java tools often expect (not tested without it). |
 | `--cap-drop ALL` and the six `--cap-add` | Keeps only what start-up needs to hand MySQL, Fishbowl and the page their own users and files. |
 | `--security-opt no-new-privileges:true` | No process in the container can gain privileges it didn't start with. |
 | `--pids-limit 4096` | Caps processes and threads, so a runaway can't exhaust the computer. |
-
-Without further options the container also backs up every database each night
-at 01:17 in its time zone (`TZ`), keeping the newest seven, and runs the watchdog.
-`-e FISHBOWL_BACKUP_TIME=…`, `-e FISHBOWL_SERVER_XMX=…` and the rest are in
-[Environment variables](#environment-variables). To get Fishbowl Server's and
-MySQL's own logs in `docker logs` as well, add `-e FISHBOWL_LOG_STREAM=1` together
-with `--log-opt max-size=10m --log-opt max-file=5`, so the log can't fill the disk
-(Compose does both by default).
 
 **Starting automatically.** `--restart always` (Compose: `restart: always`)
 starts the container whenever Docker starts. Per Docker's documentation, a
@@ -409,21 +336,10 @@ same on every system.
 missing company database and new-version upgrades all wait on the Fishbowl page
 while the container stays up. If Fishbowl Server or MySQL stops unexpectedly
 (a crash, the out-of-memory killer), the container starts it again in place.
-
-**A Fishbowl Server that hangs is restarted too.** A frozen or deadlocked Java
-process keeps its port open, so Docker would only call it *unhealthy* and leave it
-there. While Fishbowl Server runs, a watchdog inside the container checks every 5
-seconds that it answers a small web request on port 2456, and that MySQL answers.
-After three misses in a row (about 15 to 30 seconds) it ends the one that hangs and
-starts it again, and the log says so with a `[watchdog]` line. The check only
-starts once Fishbowl Server has answered it once, so a setup where port 2456
-doesn't answer web requests at all is never mistaken for a hang.
-`-e FISHBOWL_WATCHDOG=0` turns it off ([Environment variables](#environment-variables)).
-
-After four unplanned restarts within ten minutes it stops trying: for Fishbowl
-Server it says so on the page, and for MySQL the container exits so that Docker's
-restart policy starts it fresh. Otherwise the container only exits when MySQL
-can't start at all, or when another container is already using the same volumes.
+After four such stops within ten minutes it stops trying: for Fishbowl Server it
+says so on the page, and for MySQL the container exits so that Docker's restart
+policy starts it fresh. Otherwise the container only exits when MySQL can't
+start at all, or when another container is already using the same volumes.
 
 **Docker Desktop's Run button** (in the Images list) starts a container with no
 published ports unless you fill them in under its optional settings, so the
@@ -533,15 +449,10 @@ or `docker rm -f` and `docker run` again). To start over with no database at
 all, remove the volumes as well. That also removes the Fishbowl installation, so
 setup runs again (license agreement and license). Take a backup first if you
 want to keep anything ([section 11](#11-backups-and-your-data)). With Docker
-Compose, in its folder (`docker compose down -v` alone isn't enough: this
-`compose.yaml`'s volumes are external, so Compose leaves them alone on purpose):
+Compose:
 
 ```
-docker compose down
-docker volume rm fishbowl-mysql fishbowl-app fishbowl-data
-docker volume create fishbowl-mysql
-docker volume create fishbowl-app
-docker volume create fishbowl-data
+docker compose down -v
 docker compose up -d
 ```
 
@@ -710,7 +621,7 @@ to Fishbowl**. Of those, only Backup Database was tried here
 |---|---|
 | Port (2456) | The port Fishbowl Clients use. If you change it, publish the new port instead (`-p NEW:NEW`, or the `ports:` line in `compose.yaml`) and recreate the container. |
 | Secure Connection, Certificate, Certificate Password | Fishbowl uses a `.jks` certificate file for this. The file must be inside the container: copy it to the import folder like a `.sql` file. Not tested here. |
-| Legacy Port (28192) | Fishbowl's API, published (`-p 28192:28192`, Compose's `FB_API_PORT`) for integrated apps and integrations. It's plain TCP: keep it to your network. If nothing you use connects to it, you can leave the `-p` out. |
+| Legacy Port (28192) | Not published. Publish it (`-p 28192:28192`) only if something you use still connects to it. |
 | Inactivity Time | Fishbowl's inactivity timeout, in minutes. |
 | Broadcast Server Location, Users can only be logged in once | Fishbowl's own options. |
 | Server memory | Set to 8192 MB at install. A new value takes effect at the next restart; the log shows `Server memory changed in Server Administration: now …` and the heap in `Fishbowl Server is running (heap …)`. Keep Docker's memory limit above it ([section 2](#how-much-memory-docker-gets)). |
@@ -746,7 +657,7 @@ follows it when you resize the tab.
 **Fishbowl Clients on other computers** connect to the Docker host's **name or
 IP address, port 2456** (or the computer's port you published instead, see
 [a port is already in use](#a-port-is-already-in-use)). The client that comes
-with 26.10 defaults to the server's web port (`ServerPort=2456`,
+with 26.10 and 26.11 defaults to the server's web port (`ServerPort=2456`,
 `UseWebConnection=true` in its `client.properties`).
 
 The host's firewall has to let TCP 2456 in, and 28192 for integrated apps and
@@ -810,13 +721,12 @@ These commands are the same on Linux, macOS and Windows.
 | Task | How |
 |---|---|
 | Open the page | the link from `docker exec fishbowl fishbowl-link` (your browser remembers the sign-in for 30 days) |
-| Start, stop, restart Fishbowl Server | the buttons on the page (MySQL and the page keep running), or `docker exec fishbowl fishbowl-server stop` (`start`, `restart`; `--wait` waits until it's done) |
+| Start, stop, restart Fishbowl Server | the buttons on the page (MySQL and the page keep running) |
 | Stop or start the whole container | `docker stop fishbowl` / `docker start fishbowl` (Compose, in its folder: `docker compose stop` / `docker compose up -d`) |
-| Status | the page, or `docker ps` (shows *healthy* once Fishbowl Server answers on its port) |
-| Log | `docker logs -f fishbowl` (Ctrl+C stops following it). With Compose it includes Fishbowl Server's and MySQL's own lines, tagged `[fbserver]` and `[mysqld]` |
+| Status | the page, or `docker ps` (shows *healthy* once Fishbowl Server accepts connections) |
+| Log | `docker logs -f fishbowl` (Ctrl+C stops following it) |
 | Fishbowl Server's own log | `docker exec fishbowl tail -n 100 /opt/Fishbowl/logs/fbserver.log` |
-| Back up all of MySQL now | `docker exec -it fishbowl fishbowl-backup` (the nightly one runs by itself, [section 11](#scheduled-backups-every-night)) |
-| When did the last nightly backup finish? | `docker exec fishbowl fishbowl-healthcheck --backup-age 26` (exits 1 when it's 26 hours or older) |
+| Back up all of MySQL | `docker exec -it fishbowl fishbowl-backup` |
 | Versions in the image | `docker run --rm --platform linux/amd64 fishbowl versions` |
 
 ## 11. Backups and your data
@@ -827,66 +737,11 @@ These commands are the same on Linux, macOS and Windows.
 |---|---|---|
 | `fishbowl-mysql` | `/var/lib/mysql` | MySQL's data directory: your Fishbowl database(s). |
 | `fishbowl-app` | `/opt/Fishbowl` | Fishbowl as installed: program files, settings (`server/bin/eve.properties`, which holds the license key and Fishbowl's encrypted database password), Fishbowl's logs and reports, and Fishbowl's own backups (`data/backups/`). |
-| `fishbowl-data` | `/var/lib/fishbowl` | The container's state (setup and license-agreement records, installed version, the page's access code, when the last nightly backup finished), the import folder (`import/`), `fishbowl-backup` files, nightly backups included (`backups/`), logs, and the installer's temporary files. |
+| `fishbowl-data` | `/var/lib/fishbowl` | The container's state (setup and license-agreement records, installed version, the page's access code), the import folder (`import/`), `fishbowl-backup` files (`backups/`), logs, and the installer's temporary files. |
 
 Docker keeps volumes inside its own storage (on macOS and Windows, inside
 Docker Desktop's virtual machine), not in a folder you can open. The commands
 below copy things out to the folder your terminal is in.
-
-### Scheduled backups, every night
-
-The container backs up every MySQL database by itself once a day, at 01:17 in its
-time zone unless you set another time, while Fishbowl keeps running. Each night
-writes three files to `/var/lib/fishbowl/backups/`, all readable by root only:
-
-| File | Holds |
-|---|---|
-| `scheduled-<UTC time>.sql.gz` | A consistent `mysqldump` of every database (MySQL's users included), checked for its `-- Dump completed` trailer before it's kept. |
-| `scheduled-<UTC time>.settings.tar.gz` | Fishbowl's `eve.properties` and `dbsettings.properties` (your License Key and Fishbowl's database settings), for rebuilding a lost server. |
-| `scheduled-<UTC time>.sha256` | SHA-256 checksums of both. |
-
-The newest seven are kept and older ones deleted. The container's log gets one
-line each night (`Scheduled backup written: …`, or a warning saying why it
-failed), and a night when a setup or an upgrade is running is skipped with a line
-saying so. If the installation still has a MySQL root password of its own (set up
-by an earlier version of this image), the nightly backup can't run unattended and
-warns every night; use `docker exec -it fishbowl fishbowl-backup` by hand.
-
-| Setting | Compose (`.env`) | `docker run` |
-|---|---|---|
-| Time of day (24-hour, the container's time zone), or `off` | `FB_BACKUP_TIME=01:17` | `-e FISHBOWL_BACKUP_TIME=01:17` |
-| How many to keep | `FB_BACKUP_KEEP=7` | `-e FISHBOWL_BACKUP_KEEP=7` |
-
-Check a backup at any time (gzip intact, trailer present, checksums match):
-
-```sh
-docker exec fishbowl ls -l /var/lib/fishbowl/backups/
-docker exec fishbowl fishbowl-backup --verify /var/lib/fishbowl/backups/scheduled-20261119T081700Z.sql.gz
-```
-
-**Keep a copy somewhere else.** These backups sit on the same disk as the database,
-so they don't help if that disk or the computer is lost. Copy them off regularly,
-for example with a scheduled task on the computer that runs Docker, into a folder
-that your own backup software takes offsite (encrypted: they hold your company
-data and License Key):
-
-**Linux and macOS**
-
-```bash
-mkdir -p ~/fishbowl-backups
-docker cp fishbowl:/var/lib/fishbowl/backups/. ~/fishbowl-backups/
-```
-
-**Windows (PowerShell)**
-
-```powershell
-New-Item -ItemType Directory -Force "$HOME\fishbowl-backups" | Out-Null
-docker cp fishbowl:/var/lib/fishbowl/backups/. "$HOME\fishbowl-backups\"
-```
-
-A nightly backup restores like any `fishbowl-backup` file, with the `restore`
-command below; its `.settings.tar.gz` goes back into `/opt/Fishbowl/server/bin/`
-only when you rebuild a server from nothing.
 
 ### Fishbowl's own backups
 
@@ -1006,7 +861,7 @@ docker run --rm --platform linux/amd64 --entrypoint tar -v fishbowl-mysql:/volum
 
 When a new Fishbowl Advanced version comes out, the installer on this
 repository's GitHub release is replaced with the new one ([section
-14](#14-maintaining-this-repository)). The steps below move your server to it.
+14](#15-maintaining-this-repository)). The steps below move your server to it.
 Paste them one block at a time, in a terminal opened in the folder where the
 backup file should go, and read what each block prints before going on.
 
@@ -1023,14 +878,11 @@ back to exactly where you were.
 stop`, `docker rm` without `-v`, `docker run` with the same three `-v`, `docker
 compose build` and `docker compose up -d`.
 
-**Deletes your data, so never run these during an update:** `docker volume rm`,
-`docker volume prune` (with `-a` it takes named volumes that no container uses at
-that moment, which during an update can be yours), `docker system prune --volumes`,
-and in Docker Desktop **Troubleshoot → Clean / Purge data** or **Reset to factory
-defaults**. Uninstalling Docker Desktop deletes its volumes too. `docker compose
-down -v` (or `--volumes`) leaves them alone with this repository's `compose.yaml`,
-whose volumes are external, but deletes them with a copy from before November
-2026: don't run it either.
+**Deletes your data, so never run these during an update:** `docker compose
+down -v` (or `--volumes`), `docker volume rm`, `docker volume prune`, `docker
+system prune --volumes`, and in Docker Desktop **Troubleshoot → Clean / Purge
+data** or **Reset to factory defaults**. Uninstalling Docker Desktop deletes its
+volumes too.
 
 **Disk space:** in testing, the backup file was 773 MB for a new installation
 with a new company database. Yours adds your databases, compressed.
@@ -1045,7 +897,7 @@ docker images fishbowl
 ```
 
 The list shows the image twice: as `fishbowl`, and with its version, for
-example `fishbowl:2026.10`. The version tag keeps it on your computer after the
+example `fishbowl:2026.11`. The version tag keeps it on your computer after the
 new build takes the name `fishbowl`, and it's what you'd go back to.
 
 ### Step 2: Build the new version
@@ -1168,7 +1020,7 @@ container waits as long as it takes.
 - Log in with a Fishbowl Client and look at a few recent orders and items.
 
 Once you're sure, you can delete the old image to save space, for example
-`docker image rm fishbowl:2026.10`. That removes the image only, never data.
+`docker image rm fishbowl:2026.10` once 26.11 runs well. That removes the image only, never data.
 
 ### If something goes wrong: back to where you were
 
@@ -1189,7 +1041,7 @@ space and run the block again: it starts over from the file each time.
 
 ```bash
 BACKUP="fishbowl-volumes-20261117-093000.tar.gz"
-OLD="fishbowl:2026.10"
+OLD="fishbowl:2026.10"   # the version you came from
 docker stop fishbowl
 docker run --rm --platform linux/amd64 --entrypoint sh -e BACKUP="$BACKUP" \
   -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data \
@@ -1200,7 +1052,7 @@ docker run --rm --platform linux/amd64 --entrypoint sh -e BACKUP="$BACKUP" \
 
 ```powershell
 $BACKUP = "fishbowl-volumes-20261117-093000.tar.gz"
-$OLD = "fishbowl:2026.10"
+$OLD = "fishbowl:2026.10"   # the version you came from
 docker stop fishbowl
 docker run --rm --platform linux/amd64 --entrypoint sh -e "BACKUP=$BACKUP" -v fishbowl-mysql:/volumes/mysql -v fishbowl-app:/volumes/app -v fishbowl-data:/volumes/data -v "${PWD}:/backup" $OLD -c 'tar -tzf /backup/$BACKUP > /dev/null || { echo BACKUP FAILED, the volumes were not changed; exit 1; }; find /volumes/mysql /volumes/app /volumes/data -mindepth 1 -delete && tar -xzpf /backup/$BACKUP -C /volumes && echo Restored from $BACKUP'
 if ($LASTEXITCODE -eq 0) { docker tag $OLD fishbowl; docker rm fishbowl }
@@ -1224,7 +1076,7 @@ as it was at the backup.
 - **Downgrades are refused:** an older image on newer volumes starts nothing,
   changes nothing, and the page says why. That's why going back uses the backup.
 - If Fishbowl Server reports that it can't update the database, the page shows
-  Fishbowl's reason ([Troubleshooting](#16-troubleshooting)).
+  Fishbowl's reason ([Troubleshooting](#17-troubleshooting)).
 
 ### Updates to the system inside the container (MySQL, Java and the rest)
 
@@ -1244,7 +1096,7 @@ to remember them:
   day and the Fishbowl page shows a warning. `-e FISHBOWL_IMAGE_MAX_AGE_DAYS=…`
   changes the 14.
 
-The container runs read-only ([section 13](#13-security)), so nothing changes
+The container runs read-only ([section 14](#14-security)), so nothing changes
 its packages while it runs. That's on purpose: what runs is exactly what was
 built and checked.
 
@@ -1261,26 +1113,30 @@ A MySQL update is a patch release inside 8.4, which MySQL installs over an
 existing data directory by itself the next time it starts. The weekly
 maintenance takes its backup before that start. I tested this once by hand: a
 data directory made by 8.4.10 started on 8.4.13 after the update, upgraded
-itself, and kept its data (see section 17).
+itself, and kept its data (see section 18).
 
 ### Weekly maintenance (set it up once)
 
 `fishbowl-maintain.sh` (Linux and macOS) and `fishbowl-maintain.ps1` (Windows)
 do a whole update in one go, and a scheduled task runs them every week. They
-work with Compose, from the folder that holds `compose.yaml`; the Compose quick
-start downloads them there. One run:
+work with [the Compose stack](#13-the-compose-stack), from the folder that holds
+`compose.yaml`; its setup downloads them there. One run:
 
-1. Builds a new image with every package update, as `fishbowl:candidate`. The
-   running container isn't touched, and a failed build changes nothing.
-2. If the container isn't running, the new image waits for its next start, and
-   that's all.
+1. Builds new images with every package update, all in one go: Fishbowl
+   Server's as `fishbowl-server:candidate`, and the stack's others (page,
+   desktop, db, backup, edge, edge-tcp, egress), each keeping its current image
+   as `:previous`. The running containers aren't touched, and a failed build
+   changes nothing.
+2. If Fishbowl Server's container isn't running, the new images wait for the
+   next start, and that's all.
 3. Backs up every MySQL database (`fishbowl-backup --label weekly-maintenance
    --keep 4`, into `/var/lib/fishbowl/backups`). No backup, no change.
-4. Keeps the current image as `fishbowl:previous`, recreates the container on
-   the new image with the same volumes, and waits up to 20 minutes for it to be
-   back where it was (healthy, if it was healthy before).
-5. If it isn't, saves the failed container's log next to `compose.yaml`, puts
-   `fishbowl:previous` back and recreates the container again.
+4. Keeps the current server image as `fishbowl-server:previous`, recreates the
+   containers on the new images with the same volumes, and waits up to 20
+   minutes for them to be back where they were (healthy, if they were healthy
+   before).
+5. If they aren't, saves the failed containers' logs next to `compose.yaml`, puts
+   every `:previous` back and recreates the containers again.
 
 **This restarts Fishbowl once a week.** Clients are disconnected for the few
 minutes the swap takes, so pick a time nobody works. Earlier versions of this
@@ -1323,7 +1179,285 @@ fishbowl-backup` and then the script by hand. And on macOS and Windows, Docker
 Desktop has to be running, which needs someone signed in; a Linux server with
 Docker Engine doesn't.
 
-## 13. Security
+## 13. The Compose stack
+
+`compose.yaml` runs Fishbowl as a set of small containers instead of one: the
+layout for a server that runs for years. Nothing that runs for long is root,
+each part reaches only the networks it needs, the page is behind HTTPS, every
+database gets a verified dump each night, and every part restarts by itself.
+Sections 3 to 12 describe the single container, which stays as it is; a given
+set of volumes is used by one or the other.
+
+| Container | What it does | Runs as | Networks |
+|---|---|---|---|
+| `fishbowl` | Fishbowl Server, first-time setup, upgrades | uid 1000 (`fishbowl`) | app, data |
+| `fishbowl-page` | The Fishbowl page | uid 1001 (`fbweb`, in Fishbowl's group) | app |
+| `fishbowl-desktop` | Server Administration and the Fishbowl Client, each on its own virtual screen | uid 1000 | app, data |
+| `fishbowl-db` | MySQL 8.4 (the official `mysql:8.4` image) | uid 27 | data |
+| `fishbowl-backup` | A verified dump of every database, every night | uid 1000 | data |
+| `fishbowl-edge` | HTTPS for the page (443), the page on this computer (127.0.0.1:6080), TLS for Clients if you want it | uid 1002 | public, app |
+| `fishbowl-edge-tcp` | Ports 2456 (Fishbowl Clients) and 28192 (integrated apps) | `haproxy` | public, app |
+| `fishbowl-egress` | The only way out: Fishbowl's own servers, by name | `squid` | app, outbound |
+| `fishbowl-volume-init` | Runs first, hands the volumes to the users above, exits | root with three capabilities, no network | none |
+
+Every long-running container has a read-only image, no Linux capabilities at
+all, `no-new-privileges`, a process limit, rotated logs and `restart: always`.
+Only the two edge containers publish ports. `app` and `data` are internal
+networks with no route out, and the page is never on `data`: the container that
+faces browsers can't reach MySQL and never holds a password. The images are
+Red Hat's UBI 9 (server and page), AlmaLinux 9 (desktop), the official MySQL 8.4
+image (db and backup), Caddy, HAProxy and Alpine (the edges and egress), all
+built from this repository with every package update applied, as the single
+container is.
+
+### Set it up
+
+Edit `.env` before the first `docker compose up -d`: at least `FB_TZ` (your time
+zone) and `FB_PUBLIC_HOST` (the name or IP address people type to reach this
+computer; the HTTPS certificate is made for it). The first start builds the
+images from GitHub, which takes a while (the Fishbowl installer alone is about
+750 MB). Tested on Docker Engine on Linux; not yet on Docker Desktop.
+
+**Linux and macOS**
+
+```bash
+mkdir -p ~/fishbowl/secrets && cd ~/fishbowl
+for f in compose.yaml .env.example tools/fishbowl-maintain.sh rootfs/usr/local/lib/fishbowl/mysql-root-password.txt; do curl -fsSLO "https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/$f"; done
+mv mysql-root-password.txt secrets/ && chmod 644 secrets/mysql-root-password.txt
+cp .env.example .env
+for v in mysql app data backups dbconf edge; do docker volume create "fishbowl-$v"; done
+docker compose up -d
+docker exec fishbowl fishbowl-link
+```
+
+**Windows (PowerShell)**
+
+```powershell
+New-Item -ItemType Directory -Force "$HOME\fishbowl\secrets" | Out-Null
+cd "$HOME\fishbowl"
+foreach ($f in 'compose.yaml', '.env.example', 'tools/fishbowl-maintain.ps1', 'rootfs/usr/local/lib/fishbowl/mysql-root-password.txt') { curl.exe -fsSLO "https://raw.githubusercontent.com/cesiumskater/Docker_Testing/main/$f" }
+Move-Item mysql-root-password.txt secrets\
+Copy-Item .env.example .env
+foreach ($v in 'mysql', 'app', 'data', 'backups', 'dbconf', 'edge') { docker volume create "fishbowl-$v" }
+docker compose up -d
+docker exec fishbowl fishbowl-link
+```
+
+`fishbowl-link` prints two links: one for this computer
+(`http://localhost:6080/...`) and one for your network
+(`https://FB_PUBLIC_HOST/...`). From there it's the same as the single
+container: [first-time setup](#6-first-time-setup), then [your company
+database](#7-your-company-database-restore-a-sql-backup-or-create-a-new-one).
+In Server Administration's **+** dialog leave **Host** as `localhost`, as
+everywhere else: in the desktop container, `localhost:3306` leads to the
+database container. Then set up the [weekly
+maintenance](#weekly-maintenance-set-it-up-once) with the script you downloaded.
+
+**The volumes are created outside Compose on purpose**, so `docker compose down
+--volumes` can't delete them (tested). Only `fishbowl_fishbowl-ipc`, a small
+in-memory volume the containers use to talk to each other, belongs to Compose;
+it holds nothing to keep.
+
+**The MySQL root password file** is the repository's, the same one the single
+container carries ([The MySQL root password](#the-mysql-root-password)): Fishbowl
+fills its own copy of it into Server Administration's Password fields, so keep
+it. Compose hands it to `fishbowl`, `db` and `backup` as a secret at
+`/run/secrets/mysql_root`; no image carries it, and the page and the desktop
+never see it. It has to be readable by the containers' users (hence `chmod
+644`); keep the `secrets` folder itself private. In the database container root
+can sign in only from `localhost` and the data network (`172.31.240.0/24` unless
+you change `FB_DATA_SUBNET`), never from anywhere.
+
+### Moving from the single container
+
+The stack uses the single container's three volumes as they are, so a site
+moves over with its data:
+
+```bash
+docker stop fishbowl && docker rm fishbowl
+for v in backups dbconf edge; do docker volume create "fishbowl-$v"; done
+docker compose up -d
+```
+
+(PowerShell: the same three lines, with `foreach ($v in 'backups', 'dbconf',
+'edge') { docker volume create "fishbowl-$v" }` for the second; `&&` needs
+PowerShell 7, so in Windows PowerShell 5.1 run the two `docker` commands one
+after the other.)
+
+`volume-init` hands the files to the stack's users, the page keeps its access
+code (saved links keep working), the database container adds root's account for
+its network, and Fishbowl Server starts against it with no questions. Going back
+works the same way in reverse (`docker compose down`, then the `docker run` from
+[section 4](#4-start-it-and-starting-automatically)): the single container takes
+the files back and points Fishbowl at its own MySQL again. Root's account for the
+data network stays in MySQL then; the single container's MySQL listens on its
+own loopback only, so nothing can use it. (Moving over was tested; going back
+wasn't run end to end.)
+
+### The HTTPS front door
+
+The edge serves the page over HTTPS on `FB_HTTPS_PORT` (443) and, for the
+computer that runs Docker, over plain HTTP on `127.0.0.1:FB_PAGE_PORT` (6080).
+The page's sign-in cookie is marked Secure over HTTPS. Old TLS versions (1.1 and
+below) are refused. `FB_TLS` says where the certificate comes from:
+
+- `internal` (default): the edge's own certificate authority, kept in the
+  `fishbowl-edge` volume (back that volume up: it holds the authority's key).
+  Browsers and Clients have to trust its root certificate once. Copy it out with
+  `docker compose cp edge:/data/caddy/pki/authorities/local/root.crt
+  ./fishbowl-edge-root.crt` and import that file into the computers' trust
+  stores. Its server certificates last 12 hours and renew by themselves.
+- `/certs/tls.crt /certs/tls.key`: your own certificate and key, as files in
+  `FB_TLS_DIR` (`./certs` by default).
+- an email address: a public certificate from Let's Encrypt. That needs
+  `FB_PUBLIC_HOST` in public DNS and ports 80 and 443 reachable from the
+  internet; port 80 isn't published by this `compose.yaml`, so it isn't set up
+  for that out of the box. **Not tested.**
+
+Fishbowl Clients connect to `edge-tcp` on 2456 as they always have. With
+`FB_CLIENT_TLS=edge`, the edge terminates TLS on 2456 with its certificate
+instead, and Clients connect to `FB_PUBLIC_HOST` with **Secure Connection** on.
+Tested: Fishbowl Server's web app and its API answer through that TLS. **Not
+tested:** a Fishbowl Client signing in over Secure Connection. Integrated apps on
+28192 always get plain TCP, so keep that port to your network. Fishbowl Server
+sees the edge's address, not the Client's (the edge-tcp log has the Client's).
+
+### The egress allowlist
+
+The containers have no route to the internet. Fishbowl Server and the windows
+go out through `egress`, a proxy that only lets through, by name:
+`fishbowlconnect.com`, `www.fishbowlconnect.com`, `artanis.fishbowldev.com`,
+`files.fishbowlinventory.com` and `www.fishbowlinventory.com` (licenses,
+plugins, Fishbowl's own update checks), HTTPS on 443 and plain HTTP on 80 and 81
+only. A name off the list, an IP address or another port is refused, and the
+proxy's log (`docker logs fishbowl-egress`) says so.
+
+- `FB_EGRESS_EXTRA` adds names, separated by spaces or commas: an integration's
+  servers, or a plugin's. Two plugin hosts Fishbowl 26.11 knows about aren't on
+  the default list: `metadata.fishbowlinventory.app` (AI Insights) and
+  `pi-metrics.fishbowlinventory.app` (ShipExpress metrics).
+- `FB_EGRESS_UPSTREAM=host:port` sends everything through your network's own
+  proxy, if it requires one.
+- `docker exec fishbowl fishbowl-netcheck` shows what gets through, and confirms
+  there's no direct way out.
+
+### Backups in the Compose stack
+
+The `backup` container dumps every database each night at `FB_BACKUP_TIME` (in
+`FB_TZ`) into the `fishbowl-backups` volume. One set is a folder named after its
+UTC time, holding `all-databases.sql.gz` (for a full restore), one dump per
+company database (rows in primary-key order, no dump date, so the same data gives
+the same file), Fishbowl's `eve.properties` and `dbsettings.properties` (your
+License Key is in them), `reports.tar.gz` (Fishbowl's report files: the database
+only holds each report's name and path) and `MANIFEST.sha256`. Files are readable
+by the backup container's user only. It keeps 14 daily, 8 weekly and 12 monthly
+sets (`FB_BACKUP_KEEP_*`), checks free space first, and reports unhealthy when the
+newest set is over 26 hours old.
+
+| Command | |
+|---|---|
+| `docker exec fishbowl-backup fishbowl-backup --now` | A set now. |
+| `docker exec fishbowl-backup fishbowl-backup --verify` | Checks the newest set: gzip, the dump's completion line, the manifest's hashes. |
+| `docker exec fishbowl-backup fishbowl-backup --list` | The sets. |
+| `docker exec fishbowl-backup fishbowl-backup --latest DATABASE` | The newest dump of one database, for a restore. |
+
+**Copy the sets offsite.** The backup container has no route out, on purpose, so
+the computer that runs Docker copies the `fishbowl-backups` volume somewhere
+else, encrypted, on its own schedule (for example
+`docker run --rm -v fishbowl-backups:/b:ro -v "$PWD":/out alpine tar -czf /out/fishbowl-backups.tar.gz -C /b .`
+and your usual offsite tool). Where those copies should live is your call.
+
+**Restoring a company database** from a set (bad data, computer fine): stop
+Fishbowl Server on the page, then restore the dump in Server Administration's
+**Restore** tab (upload it on the page first, uncompressed) or load it with the
+`mysql` client, and start Fishbowl Server again. A drill restore of the newest
+set into a throwaway MySQL matched the live database row for row (tested; the
+comparison uses data-only dumps, since MySQL 8.4 writes table definitions
+slightly differently after a reload).
+
+### Fishbowl's own updates
+
+Normally new Fishbowl versions arrive as new images and wait for you on the page
+([section 12](#12-updating-to-a-new-fishbowl-version)). With `FB_NATIVE_UPDATES=1`
+Fishbowl may also download and apply its own updates (Server Administration →
+**Server** → **Auto Updates**). The container then:
+
+- tells Fishbowl it runs in a container (`FishbowlContainerized=true`), so
+  Fishbowl leaves database backups to the backup container;
+- takes a database backup before Fishbowl applies a downloaded update, and holds
+  the update back if that backup fails;
+- shows **updating** on the page while Fishbowl's updater works, and starts
+  Fishbowl Server again afterwards (Fishbowl's own restart script is replaced by
+  one that hands the restart to the container);
+- removes the Java debug port Fishbowl's service launcher opens on 127.0.0.1:7770
+  before every start, as it always does.
+
+Trial installations never look for updates (Fishbowl skips the check for them),
+and Fishbowl's first check runs 50 to 250 hours after a start. Tested with
+Fishbowl's own updater and a stand-in update package in the single container.
+**Not tested with a real Fishbowl update**, which needs a purchased license, or in
+the stack. To test it: set
+`FB_NATIVE_UPDATES=1`, choose **Automatically download and apply updates** with a
+day and hour in Server Administration, and when the time has passed check
+`docker logs fishbowl` (the backup and the restart), the version on the page, and
+`/opt/Fishbowl/logs/update.log`.
+
+### When something fails
+
+- **Fishbowl Server hangs** (Java still accepts connections but doesn't answer):
+  the supervisor asks it for an HTTP answer every 5 seconds, and after three
+  misses in a row stops it and starts it again in the same container. Tested: a
+  frozen Java was restarted 26 to 30 seconds after it froze, and ran again within
+  a minute.
+- **Fishbowl Server or the container crashes:** started again in place, or by
+  Docker within half a second. After four unplanned stops within ten minutes it
+  stays stopped and the page says why, so a crash loop doesn't run forever.
+- **MySQL restarts under it:** Fishbowl Server doesn't get new database
+  connections by itself (tested: sign-ins failed until it restarted), so the
+  supervisor watches for a MySQL restart, even one too quick to see it gone, and
+  starts Fishbowl Server again. Tested: back within half a minute, and a Client
+  could sign in.
+- **The computer restarts:** every container comes back by itself; Fishbowl
+  Server waits for the database. Tested by restarting Docker: everything healthy
+  again 30 seconds later, with no command.
+
+Every container has a health check that tests real work (an HTTP answer from
+Fishbowl Server, MySQL's ping, the page's sign-in page, the desktop's request
+loop, the age of the newest backup). Docker only reports health; for alerts, feed
+`docker events --filter event=health_status --filter event=die` to your
+monitoring.
+
+**Logs:** every line in `docker logs` of the stack's Fishbowl containers starts
+with a UTC timestamp and a tag (`[fishbowl]`, `[fbserver]` for Fishbowl Server's
+own output, `[watchdog]`, `[warning]`, ...), one event per line, Java stack
+traces included. Logs rotate at 10 MB, five files per container. The MySQL root
+password and the page's access code never appear in them (tested).
+
+### What's different inside
+
+- **Fishbowl's installer runs as Fishbowl's user.** It refuses to run unless the
+  user is named root, and that's all it checks (Java's `user.name`), so the server
+  container tells it that name. It still runs as uid 1000 and can only write
+  Fishbowl's own folders. Setup and an upgrade on the page both work that way
+  (tested). Two of the installer's steps fail harmlessly as a result: creating
+  the `fishbowl` group (it exists) and registering a system service (containers
+  have none).
+- **Server Administration's `localhost` is the database container** inside the
+  desktop container, through a small relay that only that container can reach,
+  so the **+** dialog and the **Restore** tab work exactly as in the single
+  container (tested: a new database, and the 54 MB reference backup restored
+  through the page). Fishbowl's settings then say `localhost`, and the server
+  container points them at `db` before every start.
+- **The windows look the same:** the desktop and server images use the single
+  container's fonts (Noto Sans for Java's sans-serif), so window sizes and the
+  reports that ask for Arial or SansSerif come out the same. Without that, Server
+  Administration came out 70 pixels wider.
+- **Java is the Temurin 21 JRE**, not the JDK, and the server image has no
+  window libraries or compilers. Fishbowl Server, setup, upgrades, Server
+  Administration and the Client ran on it in the tests; printing reports from the
+  Client on it wasn't compared with the single container's output.
+
+## 14. Security
 
 - **The page is the only way in** to the setup form, the browser windows and the
   buttons, and it needs the access code. The windows' virtual screens listen on
@@ -1344,9 +1478,7 @@ Docker Engine doesn't.
   checks every value again. Fishbowl Server, Server Administration and the
   Client run as `fishbowl`, MySQL as `mysql`. None of them is root. The main
   process itself starts as root, because it has to hand each of them its own
-  user and files; it and its helpers (the watchdog's checks, the nightly backup
-  and the log copier) are the only root processes left, which `tests/gates.sh g3`
-  checks.
+  user and files; that's the one root process left.
 - **The container runs read-only, with the fewest privileges that work.** The
   commands in this README (and `compose.yaml`) start it with a read-only root
   filesystem and memory-only `/run`, `/tmp` and `/var/tmp`, so nothing that runs
@@ -1354,20 +1486,21 @@ Docker Engine doesn't.
   Of Linux's capabilities it keeps the six that start-up needs (`CHOWN`,
   `DAC_OVERRIDE`, `FOWNER`, `KILL`, `SETGID`, `SETUID`). `no-new-privileges`
   stops any process from gaining more than it started with, and
-  `--pids-limit 4096` caps processes and threads. No file in the image keeps a
-  setuid or setgid bit. Updates come from rebuilds
+  `--pids-limit 4096` caps processes and threads. Updates come from rebuilds
   ([section 12](#updates-to-the-system-inside-the-container-mysql-java-and-the-rest)).
 - **Your license key** goes from the form to the container through memory
   (`/dev/shm`, owner-only, deleted as soon as it's read) and never appears in the
   logs. The MySQL root password is never shown on the page, in its data or in the logs
   (next section); the checks in `tests/` make sure
   it isn't written to the logs or into the volumes.
-- **Fishbowl's and MySQL's own logs in `docker logs`** (`FISHBOWL_LOG_STREAM=1`,
-  Compose's default) pass through a filter first: the MySQL root password, the
-  License Key, other password-like values in Fishbowl's settings files and the
-  page's access code become `[redacted]`. The files in the volumes are unchanged,
-  so treat them, and the nightly backups, as you would the database.
 - MySQL listens on 127.0.0.1 inside the container only.
+- **In the Compose stack, nothing that runs for long is root**
+  ([section 13](#13-the-compose-stack)): Fishbowl Server, the page, the windows,
+  MySQL, the backup and the edges each run as their own user with no Linux
+  capabilities at all, and no process in any of them is uid 0 (tested). The one
+  exception is `volume-init`, which runs for a second before the others, with
+  three capabilities and no network, to hand the volumes to those users. The MySQL
+  root password reaches only the containers that need it, as a Compose secret.
 
 ### The MySQL root password
 
@@ -1424,7 +1557,7 @@ publish, and everything may go out, so when a connection is blocked, it's blocke
 outside the container: by the firewall on the computer that runs Docker, the
 router, or the network.
 
-**The allowlist.** These are the only connections Fishbowl 26.10 needs here.
+**The allowlist.** These are the only connections Fishbowl 26.11 needs here (the same as 26.10).
 Allow them, and nothing else:
 
 | Direction | Port | For |
@@ -1454,8 +1587,7 @@ opens any of them, either way, can go:
   Windows program that can't run in this Linux container. A Nexus setup runs on a
   Windows computer, and that computer's firewall is a separate question.
 - **3305**: MySQL 5.7's port. This image has MySQL 8.4 only.
-- **8080** (the cutsheet's "Webswing Web Interface"): nothing here starts
-  Webswing, and nothing else in Fishbowl 26.10 uses it.
+- **8080**: nothing in Fishbowl 26.10 or 26.11 uses it.
 
 If something ever listens for the network on a port outside the allowlist,
 `fishbowl-netcheck` reports it as **not allowed** and exits with 1. Opening a new
@@ -1464,7 +1596,7 @@ port is then a deliberate change to this list, not a default.
 **What Fishbowl Server reaches on the internet, and why.** Licenses and plugins
 depend on Fishbowl's servers, and so do modules in the Client's **Integrations**
 group (Accounting, Merchant Services, Plugins, and plugins such as ShipExpress).
-Fishbowl 26.10 contacts its servers by these names, taken from its own program
+Fishbowl 26.11 contacts its servers by these names (26.10's are the same), taken from its own program
 files:
 
 | Name | Port | For |
@@ -1523,7 +1655,7 @@ Client](#9-the-fishbowl-client-in-its-browser-window). Outgoing connections are
 allowed by default on Windows, macOS and Linux. If a policy or security software
 blocks them, allow exactly the outbound names and ports in the allowlist.
 
-## 14. Maintaining this repository
+## 15. Maintaining this repository
 
 ### Putting the files on GitHub
 
@@ -1571,7 +1703,7 @@ Windows line endings if you ever build from a local copy.
 
 Uploading through GitHub's web page also works: **Add file → Upload files**,
 drag in everything *inside* the unzipped folder (show hidden files so
-`.github`, `.dockerignore`, `.env.example`, `.gitattributes` and `.gitignore` come along),
+`.github`, `.dockerignore`, `.gitattributes` and `.gitignore` come along),
 commit. GitHub's upload page takes up to 100 files at a time and 25 MiB per
 file. It doesn't keep the executable bit, which doesn't matter here: the
 Dockerfile sets permissions itself.
@@ -1581,7 +1713,7 @@ Dockerfile sets permissions itself.
 The installer lives on **one permanently named release**: tag
 **`fishbowl-installer`**, holding **exactly one** file named
 `Fishbowl-<version>.sh`, exactly as Fishbowl publishes it (for example
-`Fishbowl-2026.10.sh`).
+`Fishbowl-2026.11.sh`).
 
 - **First time:** **Releases → Draft a new release**. Choose a tag: type
   `fishbowl-installer` and create it on publish. Give it a title, attach the
@@ -1613,13 +1745,6 @@ and `:latest`:
   *force* to rebuild an unchanged installer);
 - on every push to `main` that changes the image's files.
 
-Each build is smoke-tested before it's pushed: the image prints its versions, then
-a container started the hardened way (read-only, the six capabilities) must stay
-up, answer on its page and wait for first-time setup. A Trivy scan then lists any
-fixable High or Critical vulnerability in the run's summary. It reports without
-stopping the release; to make it a gate, remove `continue-on-error: true` from that
-step.
-
 After the first run, **make the package public**: a new ghcr.io package starts
 **private** and doesn't inherit the repository's visibility. On the package's
 page: **Package settings → Danger Zone → Change visibility → Public**. GitHub
@@ -1643,8 +1768,8 @@ system-wide `pip install`:
 python3 -m venv ~/.venvs/fishbowl-checks
 ~/.venvs/fishbowl-checks/bin/pip install vncdotool
 export VNCDO="$HOME/.venvs/fishbowl-checks/bin/vncdo"
-bash tests/run-checks.sh --installer ~/Downloads/Fishbowl-2026.10.sh
-bash tests/run-checks.sh --installer ~/Downloads/Fishbowl-2026.10.sh \
+bash tests/run-checks.sh --installer ~/Downloads/Fishbowl-2026.11.sh
+bash tests/run-checks.sh --installer ~/Downloads/Fishbowl-2026.11.sh \
   --reference-sql ~/Backups/MyCompany_2026-08-10-14-37.sql
 ```
 
@@ -1668,62 +1793,21 @@ them, put the extra `docker run` options in `FBCHECK_RUN_ARGS`:
 
 ```bash
 FBCHECK_RUN_ARGS='--read-only --tmpfs /run:mode=0755 --tmpfs /tmp:exec,mode=1777 --tmpfs /var/tmp:mode=1777 --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096' \
-  bash tests/run-checks.sh --installer ~/Downloads/Fishbowl-2026.10.sh
+  bash tests/run-checks.sh --installer ~/Downloads/Fishbowl-2026.11.sh
 ```
 
 `tests/maintain-check.sh --installer FILE` checks the weekly maintenance end to
-end on a Compose setup of its own: a normal run, then a new image that never
-comes back and gets rolled back. It uses the real names `fishbowl` (container and
-image), so it refuses to run where a container of that name exists.
+end on a Compose stack of its own: a normal run (every image rebuilt, a backup
+first, every container recreated and back where it was), then a new Fishbowl
+Server image that never comes back, after which every image is put back. With
+`--powershell mcr.microsoft.com/powershell:latest` it runs the Windows version,
+`fishbowl-maintain.ps1`, in PowerShell 7 instead. It uses the stack's real names
+(the `fishbowl` and `fishbowl-*` containers, volumes and images), so it refuses
+to run where any of them exists. It needs about 15 GB of free disk. On a test
+machine whose base images exist only locally, set `FB_MAINTAIN_PULL=0` and name
+them in `FBCHECK_BUILD_ARGS`, as for `run-checks.sh`.
 
-`bash tests/run-checks.sh --only unit` needs neither Docker nor an installer: it
-checks the watchdog's web request (`probe.py`: a frozen port that accepts but
-never answers counts as a hang, TLS ports work), the log copying (`logstream.py`:
-rotation, truncation, secrets blanked) and the Java repository file
-(`adoptium-repo.py`: falls back to an earlier Fedora release's tree, stops when
-there is none). The full run adds checks for the watchdog (Fishbowl Server frozen
-with `kill -STOP`: restarted within a minute), the nightly backup (it runs at the
-set time, with settings and checksums), `fishbowl-backup --with-settings` and
-`--verify`, `fishbowl-server` and the copied logs.
-
-### The validation gates on a production host
-
-`tests/gates.sh` checks a running Compose installation against the success
-criteria in [docs/container-blueprint.md](docs/container-blueprint.md#success-criteria-and-validation-gates):
-G1 starts by itself after a reboot, G2 keeps every byte of data through a rebuild
-that deletes the image, build cache and container, G3 runs nothing as root that
-shouldn't, G4 restarts a crashed or frozen Fishbowl Server or MySQL within a
-minute, G5 keeps the log deterministic and free of secrets, G6 restores a backup
-into a throwaway MySQL and compares, G7 opens only the approved ports. Run it on
-the Linux host, in the folder with `compose.yaml`:
-
-```bash
-bash tests/gates.sh safe          # G3, G5, G7: nothing is stopped
-bash tests/gates.sh g6            # stops Fishbowl Server for the backup
-bash tests/gates.sh g2 g4         # a maintenance window: rebuilds, and about 20 restarts
-bash tests/gates.sh g1-arm        # then: sudo systemctl reboot, and after it: bash tests/gates.sh g1
-```
-
-`bash tests/gates.sh --help` explains each one. They need the `tests` folder from
-this repository next to `compose.yaml`, or `--dir` pointing at that folder.
-
-### Moving to a new Fedora release
-
-Each Fedora release gets updates for about 13 months, and a new one comes out
-about every six months, so move the image along once a year at least. The base is
-one line in the `Dockerfile`, `ARG FEDORA_IMAGE=registry.fedoraproject.org/fedora:45`
-(or `--build-arg FEDORA_IMAGE=…` to try one first). Then:
-
-1. Check that the new release still has MySQL 8.4 under the versioned names
-   (`mysql8.4-server`, `mysql8.4`). The build stops if MySQL isn't 8.4.x.
-2. Build. The log says which Adoptium tree Java 21 came from; an earlier release's
-   tree is fine until Adoptium publishes the new one (`ADOPTIUM_FEDORA_RELEASE`
-   forces one).
-3. Run the full acceptance checks with `FBCHECK_RUN_ARGS` and
-   `tests/maintain-check.sh`, then start the new image on a copy of a real
-   installation's volumes before production gets it.
-
-## 15. Reference
+## 16. Reference
 
 ### Ports
 
@@ -1740,6 +1824,11 @@ one line in the `Dockerfile`, `ARG FEDORA_IMAGE=registry.fedoraproject.org/fedor
 The browser windows' VNC servers have no ports at all: they listen on Unix
 sockets in `/run/fishbowl/`.
 
+In the Compose stack only the edge containers publish ports: `FB_HTTPS_PORT`
+(443, the page over HTTPS), `127.0.0.1:FB_PAGE_PORT` (6080), `FB_CLIENT_PORT`
+(2456) and `FB_API_PORT` (28192), each on `FB_LAN_IP`. MySQL (3306) is reachable
+only on the internal data network.
+
 ### Commands
 
 The same on Linux, macOS and Windows.
@@ -1750,17 +1839,16 @@ The same on Linux, macOS and Windows.
 | `docker exec -it fishbowl fishbowl-setup` | First-time setup at a terminal instead of the page. |
 | `docker exec -it fishbowl fishbowl-upgrade` | An upgrade at a terminal instead of the page. |
 | `docker exec fishbowl fishbowl-admin` | Opens Server Administration and prints its link. |
-| `docker exec -it fishbowl fishbowl-backup` | Back up all of MySQL. Without `-it` (a scheduled task) it uses the image's MySQL password and stops with exit status 3 if the installation has its own; `--label NAME --keep N` names the file and keeps only the newest N with that name; `--with-settings` adds Fishbowl's settings files and SHA-256 checksums, as the nightly backup does. |
-| `docker exec fishbowl fishbowl-backup --verify FILE` | Checks a backup without touching MySQL: gzip intact, the dump's trailer, and its `.sha256` file if there is one. |
-| `docker exec fishbowl fishbowl-server stop` | Stops Fishbowl Server, like Stop on the page (also `start`, `restart` and `status`; `--wait` waits until it's stopped or running again). |
-| `docker exec fishbowl fishbowl-healthcheck --backup-age 26` | Exits 1 when the last nightly backup finished 26 or more hours ago (or never), for monitoring. Without options it's the container's health check. |
+| `docker exec -it fishbowl fishbowl-backup` | Back up all of MySQL. Without `-it` (a scheduled task) it uses the image's MySQL password and stops with exit status 3 if the installation has its own; `--label NAME --keep N` names the file and keeps only the newest N with that name. |
 | `docker exec fishbowl fishbowl-netcheck` | Can the container reach the servers Fishbowl uses for licenses and plugins, and what listens for the network? Changes nothing. |
 | `docker exec fishbowl update-all.sh` | On a writable container: update its Fedora packages now (also runs by itself at every start; applies from the next start). On a read-only one it says updates come from rebuilds. |
 | `bash fishbowl-maintain.sh` / `fishbowl-maintain.ps1` | The weekly maintenance, by hand: rebuild with every update, back up, swap the container, roll back on failure ([section 12](#weekly-maintenance-set-it-up-once)). In the folder with `compose.yaml`. |
 | `docker run -it --rm --platform linux/amd64 <the three -v> fishbowl restore FILE` | Restore a `fishbowl-backup` file (container stopped). |
 | `docker run --platform linux/amd64 … fishbowl admin` | Like the normal start, but Fishbowl Server stays stopped until you press Start on the page. |
-| `docker run --rm --platform linux/amd64 fishbowl version` | The image's Fishbowl version, for tagging (`2026.10`). |
+| `docker run --rm --platform linux/amd64 fishbowl version` | The image's Fishbowl version, for tagging (`2026.11`). |
 | `docker run --rm --platform linux/amd64 fishbowl versions` | Fishbowl, MySQL and Java versions in the image. |
+| `docker exec fishbowl-page fishbowl-link --new-code` | In the Compose stack: replace the page's access code (the page container keeps it). |
+| `docker exec fishbowl-backup fishbowl-backup --now` | In the Compose stack: a backup set now (`--verify`, `--list`, `--latest DATABASE`: [Backups in the Compose stack](#backups-in-the-compose-stack)). |
 
 ### Environment variables
 
@@ -1776,33 +1864,37 @@ The same on Linux, macOS and Windows.
 | `FISHBOWL_NETCHECK_DELAY` | `60` | Seconds after the container starts before that check. |
 | `FISHBOWL_UPDATE_TIMEOUT` | `1800` | Seconds before an update is given up on. |
 | `FISHBOWL_ALLOW_NO_VOLUMES` | `0` | `1` skips the check that the three data paths are volumes (throwaway tests only). |
-| `FISHBOWL_SERVER_XMX` | (empty) | Fishbowl Server's Java heap, such as `6144m` or `6g`. Set, it's written into the server's launcher settings before every start and wins over Server Administration's "Server memory"; empty, Server Administration's value applies. |
-| `FISHBOWL_BACKUP_TIME` | `01:17` | The nightly backup's time (24-hour, in `TZ`); `off` turns it off ([section 11](#scheduled-backups-every-night)). |
-| `FISHBOWL_BACKUP_KEEP` | `7` | How many nightly backups to keep. |
-| `FISHBOWL_LOG_STREAM` | `0` | `1` copies Fishbowl Server's and MySQL's own logs into the container's log, tagged `[fbserver]` and `[mysqld]`, secrets blanked out. Compose sets it to `1`. With `docker run`, add log rotation (`--log-opt max-size=10m --log-opt max-file=5`). |
-| `FISHBOWL_WATCHDOG` | `1` | `0` turns off the watchdog that restarts a Fishbowl Server or MySQL that stops answering ([section 4](#4-start-it-and-starting-automatically)). |
-| `FISHBOWL_WATCHDOG_INTERVAL` | `5` | Seconds between the watchdog's checks (2 to 300). |
-| `FISHBOWL_WATCHDOG_FAILURES` | `3` | Misses in a row before it restarts (2 to 100). Raise it if a very busy server is ever restarted without a real hang. |
+| `FISHBOWL_SERVER_XMX` | (empty) | Fishbowl Server's heap, such as `6g` or `4096m`, written into its launcher before every start; it wins over Server Administration's memory field. Empty: that field stands. |
 
 ### Compose settings (`.env`)
 
 Read by `compose.yaml` from a file named `.env` next to it; `.env.example` lists
-them. Without the file, the defaults apply.
+them with notes. Without the file, the defaults apply.
 
 | Setting | Default | |
 |---|---|---|
-| `FB_TZ` | `UTC` | The container's time zone (it becomes `TZ`). |
-| `FB_LAN_IP` | `0.0.0.0` | The address of this computer that 2456 and 28192 are published on; `0.0.0.0` is every IPv4 address. |
-| `FB_CLIENT_PORT` | `2456` | The port on this computer for Fishbowl Clients. |
-| `FB_API_PORT` | `28192` | The port on this computer for Fishbowl's API. |
-| `FB_PAGE_PORT` | `6080` | The port on this computer for the Fishbowl page (always on 127.0.0.1). |
-| `FB_MEM_LIMIT` | `0` | A memory cap for the container, such as `14g`; `0` means none. Fishbowl Server alone may use 8 GB (or `FB_SERVER_XMX`). |
-| `FB_SERVER_XMX` | (empty) | Fishbowl Server's heap, such as `6g` (it becomes `FISHBOWL_SERVER_XMX`). Empty: Server Administration's value. |
-| `FB_BACKUP_TIME` | `01:17` | The nightly backup's time in `FB_TZ`, or `off`. |
-| `FB_BACKUP_KEEP` | `7` | How many nightly backups to keep. |
-| `FB_LOG_STREAM` | `1` | Fishbowl Server's and MySQL's own logs in `docker logs` too (`0`: only the container's own lines). The log is capped at 5 files of 10 MB. |
-| `FB_WATCHDOG` | `1` | `0` turns the watchdog off. |
-| `FB_START_MODE` | `run` | `admin` starts with Fishbowl Server stopped (MySQL and the page run); `tests/gates.sh` uses it for one start. Leave it out of `.env`. |
+| `FB_TZ` | `UTC` | The containers' time zone (it becomes `TZ`); also the backup schedule's. |
+| `FB_LAN_IP` | `0.0.0.0` | The address of this computer the edge publishes on; `0.0.0.0` is every IPv4 address. |
+| `FB_PUBLIC_HOST` | `localhost` | The name or IP address people type; the HTTPS certificate is made for it. |
+| `FB_HTTPS_PORT` | `443` | The page over HTTPS, for your network. |
+| `FB_PAGE_PORT` | `6080` | The page on this computer only (127.0.0.1). |
+| `FB_CLIENT_PORT` | `2456` | Fishbowl Clients and the REST API. |
+| `FB_API_PORT` | `28192` | Fishbowl's legacy API, for integrated apps. |
+| `FB_TLS` | `internal` | Where the certificate comes from ([The HTTPS front door](#the-https-front-door)). |
+| `FB_TLS_DIR` | `./certs` | The folder with your own certificate and key, for `FB_TLS=/certs/tls.crt /certs/tls.key`. |
+| `FB_CLIENT_TLS` | `off` | `edge`: TLS for Fishbowl Clients on 2456, with the edge's certificate. |
+| `FB_EGRESS_EXTRA` | (none) | More names the egress proxy lets through ([The egress allowlist](#the-egress-allowlist)). |
+| `FB_EGRESS_UPSTREAM` | (none) | `host:port` of your network's own proxy, if it requires one. |
+| `FB_SERVER_XMX` | (empty) | Fishbowl Server's heap, such as `6g`; written before every start, so it wins over Server Administration's memory field. Empty: that field stands (8 GB from setup). |
+| `FB_MEM_LIMIT` | `0` | A memory cap for Fishbowl Server's container, such as `12g`; `0` means none. Fishbowl Server alone may use 8 GB; keep the cap well above the heap. |
+| `FB_DESKTOP_MEM_LIMIT` | `0` | The same for the windows' container (each window's Java may use 2 GB). |
+| `FB_DB_MEM_LIMIT` | `0` | The same for MySQL's container. |
+| `FB_BACKUP_TIME` | `01:17` | When the nightly backup runs, in `FB_TZ`. |
+| `FB_BACKUP_KEEP_DAILY`, `_WEEKLY`, `_MONTHLY` | `14`, `8`, `12` | How many backup sets to keep. |
+| `FB_NATIVE_UPDATES` | `0` | `1` lets Fishbowl download and apply its own updates ([Fishbowl's own updates](#fishbowls-own-updates)). |
+| `FB_MYSQL_ROOT_PASSWORD_FILE` | `./secrets/mysql-root-password.txt` | The MySQL root password file, handed to fishbowl, db and backup as a secret. |
+| `FB_DATA_SUBNET`, `FB_DATA_ROOT_HOST` | `172.31.240.0/24`, `172.31.240.%` | MySQL's internal network, and where root may sign in from. Change both only if that range is in use on your network. |
+| `FB_SOURCE` | GitHub | Build from a clone of this repository instead (for example `.`). |
 
 ### Exit codes
 
@@ -1822,18 +1914,14 @@ using the same volumes. `fishbowl-setup`, `fishbowl-upgrade` and
 | `/opt/Fishbowl/data/backups/` | Backups made with Backup Database in Server Administration. |
 | `/opt/Fishbowl/server/bin/*.vmoptions` | Server memory (`-Xmx…`); client memory is in `client/bin/`. |
 | `/var/lib/fishbowl/import/` | Files of any type, mainly `.sql` backups for the Restore tab (uploaded on the page or copied in); shown as `import` in Server Administration's file chooser. |
-| `/var/lib/fishbowl/backups/` | `fishbowl-backup`, nightly (`scheduled-*`) and pre-upgrade backups. |
+| `/var/lib/fishbowl/backups/` | `fishbowl-backup` and pre-upgrade backups. |
 | `/var/lib/fishbowl/logs/` | `mysqld.log`, setup and upgrade logs, `update-*.log` (system updates), and `session-admin.log` / `session-client.log` (the browser windows). |
-| `/var/lib/fishbowl/state/` | Setup and upgrade state, license-agreement records, the page's access code, settings waiting for a restart, `last-scheduled-backup` (when the last nightly backup finished). |
-| `/run/fishbowl/fishbowl-server.pid` | The process number of the running Fishbowl Server (its process group: the launcher and its Java). |
-| `/run/fishbowl/probe-ok` | Present once the watchdog has seen Fishbowl Server answer since its last start; the health check then asks for an answer, not just a connection. |
-| `/etc/yum.repos.d/adoptium.repo` | Where Java 21 comes from: Adoptium's tree for Fedora 45 or an earlier release, written at build time, Temurin 21 only. |
+| `/var/lib/fishbowl/state/` | Setup and upgrade state, license-agreement records, the page's access code, settings waiting for a restart. |
 | `/etc/my.cnf.d/90-fishbowl.cnf` | The guide's MySQL settings (in the image). |
 | `/run/fishbowl-mysql.d/50-fishbowl-server.cnf` | Fishbowl's `server/bin/my.cnf` tuning (`max_connections`, `innodb_buffer_pool_size`, `max_allowed_packet`, …), regenerated whenever MySQL starts, minus the two settings the guide controls. It lives under `/run` so the image can run read-only; `/etc/my.cnf.d/50-fishbowl-tuning.cnf` includes it. |
 | `/usr/local/share/fishbowl/image-built` | When the image's system packages were last brought up to date (UTC), written by every build. |
 | `/opt/fishbowl-installer/` | The bundled installer, its license texts, `installer.env`. |
 | `/usr/local/lib/fishbowl/portal.py`, `/usr/local/share/fishbowl/web/` | The Fishbowl page. |
-| `/usr/local/lib/fishbowl/probe.py`, `logstream.py` | The watchdog's check, and the copier for `FISHBOWL_LOG_STREAM`. |
 
 These are paths inside the container (Linux paths, on every system).
 
@@ -1851,11 +1939,14 @@ owner-only (as it does `eve.properties`); it doesn't delete Fishbowl's own files
 | `GITHUB_API_URL` | `https://api.github.com` | For GitHub Enterprise Server. |
 | `EXPECTED_ASSET_ID` | (empty) | Set by the workflow: fail if the installer changed mid-build. |
 | `FISHBOWL_IMAGE` | `fishbowl` | Image name shown in the container's printed commands. |
-| `FEDORA_IMAGE` | `registry.fedoraproject.org/fedora:45` | Base image. |
-| `ADOPTIUM_FEDORA_RELEASE` | (empty) | Which Fedora release's Adoptium tree Java 21 comes from. Empty: the newest that exists, this release's or one of the two before it. |
+| `FEDORA_IMAGE` | `registry.fedoraproject.org/fedora:44` | The single container's base image (also noVNC's files for the stack's page). |
+| `UBI_IMAGE` | `registry.access.redhat.com/ubi9/ubi-minimal:latest` | The stack's server and page base image (targets `server`, `page`). |
+| `DESKTOP_BASE_IMAGE` | `quay.io/almalinuxorg/almalinux:9` | The stack's desktop base image (target `desktop`), and where the server's Noto Sans font comes from. |
+| `MYSQL_IMAGE` | `mysql:8.4` | Where the stack's MySQL client tools come from; also the base of `images/db` and `images/backup`. |
+| `CADDY_IMAGE`, `HAPROXY_IMAGE`, `ALPINE_IMAGE` | `caddy:2`, `haproxy:lts-alpine`, `alpine:3` | The bases of `images/edge`, `images/edge-tcp` and `images/egress`. |
 | `PACKAGES_REFRESH` | (empty) | Any new value makes the build apply every package update again instead of reusing its cache. The weekly maintenance and the weekly CI build pass the time. |
 
-## 16. Troubleshooting
+## 17. Troubleshooting
 
 ### Commands on Linux, macOS and Windows
 
@@ -1939,7 +2030,7 @@ data, so recreating it costs nothing:
 | "No suitable Java Virtual Machine could be found" (9.4) | Not applicable: the image has only Java 21 and points the installer at it. |
 | Installer window blank or white (9.5) | Not applicable: the installer runs unattended. |
 | Bash error with `!` in the password (9.6) | Not applicable: the image's password has `!`, `$`, `^`, `%` and `=` in it, and every script handles them. |
-| MySQL 9.x instead of 8.4 (9.7) | Not possible: the image installs Fedora's versioned `mysql8.4` packages (on Fedora 45 the plain `mysql-server` is 9.7), and the build fails unless MySQL is 8.4.x. |
+| MySQL 9.x instead of 8.4 (9.7) | Not possible: the image build fails unless MySQL is 8.4.x. |
 
 ### Container-specific
 
@@ -1966,12 +2057,7 @@ data, so recreating it costs nothing:
 | `Read-only file system` in the log, or `mkdir: cannot create directory '/run/…'` at start | The container was started with `--read-only` but without the three `--tmpfs` options (or with an older `compose.yaml`). Use the full command from [section 4](#4-start-it-and-starting-automatically); your data is on the volumes. |
 | "This image's system packages are N days old" (log or page) | The weekly maintenance hasn't rebuilt the image for a while. Check the scheduled task and `fishbowl-maintain.log` ([Weekly maintenance](#weekly-maintenance-set-it-up-once)), or run it once by hand. |
 | `fishbowl-maintain.log` says "STOPPED" | It changed nothing and says why on that line. A failed build or backup is safe to retry; "busy" means a setup or an upgrade was running, and the next run tries again. |
-| `fishbowl-maintain.log` says "Rolled back" (exit status 2) | The new image didn't come back healthy, so the previous one runs again. The failed container's log is in `fishbowl-maintain-failed-*.log` next to `compose.yaml`, and the image is kept as `fishbowl:failed`. |
-| `docker compose up` says `external volume "fishbowl-mysql" not found` | The volumes are created once by hand with this `compose.yaml` (Compose never creates or deletes them): run the three `docker volume create` lines from the [Quick start](#with-docker-compose-instead-of-docker-run), then `docker compose up -d` again. |
-| `[warning] [watchdog] Fishbowl Server is running but hasn't answered …` | Fishbowl Server stopped answering on its port (frozen, deadlocked, or out of memory and stuck in garbage collection), so the watchdog restarted it. Once is worth a look at `fbserver.log` around that time; again and again, give Fishbowl Server more memory (`FB_SERVER_XMX` and Docker's memory), and if the server was only very busy, raise `FISHBOWL_WATCHDOG_FAILURES`. After four restarts in ten minutes it stays stopped and the page says so. |
-| `[warning] [watchdog] MySQL is running but hasn't answered …` | MySQL stopped answering, so it was ended and started again, with Fishbowl Server after it. Its log: `docker exec fishbowl tail -n 50 /var/lib/fishbowl/logs/mysqld.log`. |
-| `The scheduled backup failed …` | The reason follows on the same line. "Not enough free space" means the disk Docker uses is too full: free some, or lower `FB_BACKUP_KEEP`. "has a MySQL root password of its own" means an installation set up by an earlier version of this image: back up by hand with `docker exec -it fishbowl fishbowl-backup`, or set `FB_BACKUP_TIME=off`. |
-| `docker ps` says *unhealthy* while the page says Fishbowl Server is running | Fishbowl Server accepts connections but didn't answer the health check's web request in time. The watchdog acts within half a minute if it stays that way; `docker inspect --format '{{json .State.Health}}' fishbowl` shows the last checks. |
+| `fishbowl-maintain.log` says "Rolled back" (exit status 2) | The new images didn't come back where they were, so every container runs its previous image again. The containers' logs are in `fishbowl-maintain-failed-*.log` next to `compose.yaml`, and the new images are kept as `:failed` (`fishbowl-server:failed`, `fishbowl-page:failed` and so on). |
 
 ### Build problems
 
@@ -1985,38 +2071,25 @@ data, so recreating it costs nothing:
 | `invalid response status 404` on the `ADD …/releases/tags/…` step | The release doesn't exist, is a draft, or the repository is private. |
 | `invalid response status 403` or `429` on that step | Most likely GitHub's limit for unauthenticated API requests (60 an hour, counted per IP address). Wait and build again. |
 | The build can't fetch the repository (an error mentioning git) | The repository name or branch in the build URL is wrong, or the repository is private. |
-| `BUILD STOPPED: Adoptium has no Temurin tree for Fedora 45 or the 2 releases before it …` | `packages.adoptium.net` can't be reached from the build (a firewall or proxy), or Adoptium dropped the trees. Check `https://packages.adoptium.net/artifactory/rpm/fedora/` from the same network. |
-| `No match for argument: mysql8.4-server-8.4.*` | The Fedora release you built on no longer ships MySQL 8.4 under that name. Build on `fedora:45` (the default) until a newer release is checked ([section 14](#moving-to-a-new-fedora-release)). |
-| `BUILD STOPPED: mysqld must be MySQL 8.4.x` | The same cause by another route; never work around it, since Fishbowl rejects MySQL 9.x. |
 
-## 17. Versions and verification
+## 18. Versions and verification
 
-| | This repository (Fedora 45) | Last tested image (Fedora 44) |
-|---|---|---|
-| Fishbowl Advanced | **26.10** (`Fishbowl-2026.10.sh`, 756,097,431 bytes, SHA-256 `25a0a0d3109c429264afe0af4f69ed49e89fd84fd1cad5c19030b59cfe40d2b5`) | the same |
-| Base | `fedora:45` | `fedora:44` |
-| MySQL | 8.4.11 or later 8.4.x (`mysql8.4-server-8.4.11-1.fc45` at Fedora 45's release) | **8.4.10** (`mysql-server-8.4.10-1.fc44`) |
-| Java | Eclipse Temurin 21.x (`temurin-21-jdk`, from Adoptium's Fedora 45 tree, or 44's until 45's exists) | **Eclipse Temurin 21.0.13+9** |
-| Browser windows | TigerVNC 1.16.2, openbox 3.6.1, noVNC 1.5.0, websockify 0.12.0 (Fedora 45 builds of the same versions) | the same versions, Fedora 44 builds |
+| | |
+|---|---|
+| Fishbowl Advanced | **26.11** (`Fishbowl-2026.11.sh`, 756,290,571 bytes, SHA-256 `9094bc0c4961214c1156c21ca9a502350539b6ecd1d8f7e2bb81e4c063d85a2c`, released 17 November 2026) |
+| MySQL | **8.4.13** (Fedora 44 `mysql-server-8.4.13-2.fc44`) |
+| Java | **Eclipse Temurin 21.0.13.1+2** (`temurin-21-jdk`) |
+| Browser windows | TigerVNC 1.16.2 (`Xvnc`), openbox 3.6.1, noVNC 1.5.0, websockify 0.12.0 (Fedora 44) |
+| The Compose stack | Fishbowl Server and the page on Red Hat UBI 9 minimal (Python 3.9), Java **Temurin 21.0.13.1+2 JRE** (`temurin-21-jre` from Adoptium's EL9 repository), MySQL **8.4.13** (official `mysql:8.4`, Oracle Linux 9, also the client tools), the windows on AlmaLinux 9 (TigerVNC 1.16.2, openbox 3.6.1 from EPEL, websockify 0.12.0 from PyPI, pinned by hash), Caddy 2, HAProxy LTS, Squid on Alpine 3 |
 
-**The Fedora 45 image hasn't been built or tested yet.** Everything marked
-*Verified* below was run against the Fedora 44 image, before this revision. The
-Fedora 45 base, the watchdog, the nightly backup, the copied logs, the heap from
-`.env`, the external volumes in `compose.yaml`, `fishbowl-server` and
-`tests/gates.sh` were written after that and checked only as far as the last
-rows of the table say. Before production: run the full checks with
-`FBCHECK_RUN_ARGS`, `tests/maintain-check.sh`, and start the new image on a copy
-of a Fedora 44 installation's volumes (test E16 in
-[docs/container-blueprint.md](docs/container-blueprint.md#needs-empirical-test)).
-Until then, keep the Fedora 44 image you have (its version tag, step 1 of
-[section 12](#step-1-keep-the-version-you-have)) for production.
-
-A rebuild picks up Fedora's and Adoptium's current 8.4.x and 21.x updates (the
-build refuses anything else). Each build downloads the installer again.
+The versions above are what the image was tested with; a rebuild picks up
+Fedora's and Adoptium's current 8.4.x and 21.x updates (the build refuses
+anything else). Each build downloads the installer again.
 
 ### What was verified by running it, and what wasn't
 
-Tested on Docker Engine 29.9.3 (Linux, x86-64) with the 26.10 installer, using
+Tested on Docker Engine 29.9.3 (Linux, x86-64) with the 26.11 installer (and 26.10
+before it), using
 the 14 Day Trial, with the pages in headless Chromium. `tests/run-checks.sh`
 repeats the checks marked *(suite)*.
 
@@ -2044,10 +2117,10 @@ repeats the checks marked *(suite)*.
 | Recreating the container on the same volumes: no questions, same data; a second container on the same volumes refused | Verified *(suite)* |
 | No database ships in the image: the folders that become its volumes hold no files, and its only `.sql` files are two that MySQL's own package installs | Verified *(suite)* |
 | A new installation starts with no database: after setup MySQL holds only its system databases (`information_schema`, `mysql`, `performance_schema`, `sys`), none is selected, the import folder is empty | Verified *(suite)* |
-| `docker compose up -d --force-recreate` keeps the three fixed-name volumes; `docker compose down -v` removed them with the earlier `compose.yaml`, and leaves a volume declared `external` alone (why this one declares them so) | Checked with a stand-in compose project (Docker Compose v5.7.0) |
+| `docker compose down -v` removes the three fixed-name volumes; `docker compose up -d --force-recreate` keeps them | Checked with a stand-in compose project (Docker Compose v5.7.0) |
 | Network: there's no firewall inside the container; Fishbowl Server listens for the network on 2456 and 28192 only (MySQL and 7770 on the container's loopback); both answer through their published ports | Verified *(suite)*, and the listeners listed by hand with Fishbowl Server running |
 | `fishbowl-netcheck` and the warning a minute after start: they report Fishbowl's servers by name and what listens for the network, flag anything outside 2456, 28192 and 6080 (a test listener on 8080 is caught and fails the check), and warn exactly when a server is blocked | Verified *(suite)* in a network that refuses outbound port 81, as a firewall would. Not run where Fishbowl's servers are reachable (this test network passes 80 and 443 through a proxy). |
-| What Fishbowl 26.10 contacts: the names and ports read from its program files; on 17 November 2026 the license and plugin names pointed at 74.63.56.90; the plugin update check fails at every start when port 81 is blocked (`Stream is invalid` in `fbserver.log`) | Checked by hand |
+| What Fishbowl 26.10 and 26.11 contact: the names and ports read from their program files (the same 21 names and ports in both, compared on 23 November 2026); on 17 November 2026 the license and plugin names pointed at 74.63.56.90; the plugin update check fails at every start when port 81 is blocked (`Stream is invalid` in `fbserver.log`) | Checked by hand |
 | The Windows and Linux firewall commands for 2456 and 28192 | **Not run** (no Windows here, and no firewalld in the test machine) |
 | Updating (section 12), run end to end in bash from the README's own blocks, on a trial installation with a company database: steps 1 to 6 (the old image kept by tag, the new one built, the backup written and read back, the new image on the same volumes, the upgrade, every table checksum unchanged), a damaged backup refused with the volumes untouched and `docker start` bringing it back, then going back to the backup (the old version runs on the data exactly as at the backup) | Verified once. The build read a local copy of this repository and a stand-in for the GitHub release, and the "new version" was the same installer named 2026.10.1, so Fishbowl's own database update at first start of a really new version wasn't exercised. |
 | The same blocks in zsh and in PowerShell 7 hand `docker` exactly the same arguments as in bash | Checked against a stand-in `docker` that records its arguments. Not run on Windows, in Windows PowerShell 5.1 or on a Mac; Compose's `docker compose build` from GitHub not run here. |
@@ -2057,10 +2130,10 @@ repeats the checks marked *(suite)*.
 | `fishbowl-upgrade` at a terminal | Verified once |
 | The update at start on a writable container (`update-all.sh`): runs once in the background after the start delay, never restarts anything or asks, changes only files, skips MySQL and Java versions outside 8.4 and 21, stays off with `FISHBOWL_AUTO_UPDATE=0`, fails clearly when offline, keeps a few logs, waits for setup and upgrade jobs, and a real update of MySQL 8.4.10 to 8.4.13 still passes the runtime check | Verified *(suite: stand-in `dnf` tests, plus one real update)* |
 | **The hardened start** (read-only root filesystem, memory-only `/run`, `/tmp` and `/var/tmp`, `--cap-drop ALL` plus six, `no-new-privileges`, `--pids-limit 4096`): every check in this table marked *(suite)* passes on containers started that way, and nothing in the setup, MySQL, Fishbowl or session logs ran into the read-only root | Verified *(suite with `FBCHECK_RUN_ARGS` set to the README's flags: 94 passed, 0 failed)* |
+| The single container after the Compose stack's changes to the shared scripts: the whole suite again, with the hardened flags | Verified *(suite: 93 of 94 on the full run; the one miss was a build message I had reworded, put back as it was, and the 10 build checks then passed)* |
 | Each of the six kept capabilities is needed: without `CHOWN` or `FOWNER` the first start stops; without `DAC_OVERRIDE` the page never gets a state; without `KILL` setup never finishes and `docker stop` has to kill the container after 180 seconds; without `SETUID` or `SETGID` nothing can start as its own user | Verified once (a fresh container per capability left out) |
 | `fishbowl-backup` without a terminal: uses the image's password, keeps only the newest N of its label, stops with status 3 when the installation has a password of its own | Verified *(suite)* |
-| The weekly maintenance (`fishbowl-maintain.sh`) on a real Compose setup: builds a new image, backs up first, recreates the container and gets back to the same state, keeps the old image as `fishbowl:previous`; a new image that never comes back is rolled back to the previous one (status 2, its log saved, the image kept as `fishbowl:failed`) | Verified *(`tests/maintain-check.sh`: 12 passed, 0 failed)*. The PowerShell version was parsed by PowerShell 7 but not run: there's no Windows Docker host here |
-| README commands: bash, zsh and PowerShell hand `docker run` identical arguments, the hardened flags included; the scheduling commands parse in all three; the maintenance script runs under macOS's bash 3.2 | Verified with a stand-in `docker` (PowerShell 7 in a container, not Windows PowerShell 5.1) |
+| README commands: bash, zsh and PowerShell hand `docker run` identical arguments, the hardened flags included; the scheduling commands parse in all three; the maintenance script runs under macOS's bash 3.2 | Verified with a stand-in `docker` (PowerShell 7 in a container, not Windows PowerShell 5.1). The bash 3.2 run was before the maintenance script learned the Compose stack's other images; it still uses only what bash 3.2 has, but this version wasn't run in bash 3.2 again. |
 | `update-all.sh --build` in every image build: strict about a repository it can't read (the build stops), always runs the runtime check and the `mysqld` fix, writes no log files; on a read-only container `update-all.sh` changes nothing and says updates come from rebuilds | Verified *(suite: stand-in `dnf`)*; every suite build also runs it for real |
 | An image not rebuilt for over 14 days: the container's log warns, and the page's data carries the image's age for its warning | Verified *(suite)*; the warning card itself wasn't clicked through in a browser |
 | A MySQL data directory made by 8.4.10 started on 8.4.13 after the update: data kept, server upgrade completed | Verified once by hand, not in the suite |
@@ -2072,9 +2145,36 @@ repeats the checks marked *(suite)*.
 | The real GitHub repository: the `docker build` URL, the release download, the web upload, the Actions workflow, ghcr.io | The build URL and release download worked in the maintainer's runs on Linux and Windows; the rest is untested from here |
 | Docker Desktop on macOS and Linux, Apple Silicon (x86-64 emulation), Windows on ARM, Firefox and Safari, more than one person using the windows at once | Untested |
 | Running natively on `linux/arm64`; rootless Docker; Podman; behavior under production load (memory figures are estimates) | Untested |
-| **Not yet run (this revision):** the Fedora 45 build (package names, the Adoptium tree fallback, the setuid strip), and every *(suite)* check on it | Written against Fedora 45's published package lists; needs `tests/run-checks.sh` on a Docker host |
-| **Not yet run:** the watchdog (restarts a frozen Fishbowl Server or a MySQL that stops answering within a minute), the health check's web request, `fishbowl-server` | New suite checks written (*watchdog: a frozen Fishbowl Server …*, *fishbowl-server stop/start*); `probe.py` itself verified by `--only unit` against a port that accepts and never answers, a plain HTTP server and a TLS server |
-| **Not yet run:** the nightly backup, `fishbowl-backup --with-settings` and `--verify`, `fishbowl-healthcheck --backup-age` | New suite checks written; the retention and checksum steps were run once by hand outside a container |
-| **Not yet run:** `FISHBOWL_LOG_STREAM` in a container (the secret checks above then cover the copied logs too, since the suite turns it on) | `logstream.py` verified by `--only unit`: follows from the end, survives rotation and truncation, tags and timestamps every line, blanks the password, License Key and other secrets |
-| **Not yet run:** `FISHBOWL_SERVER_XMX` on a real start (E6) | The vmoptions change run once by hand on a copy of the file |
-| **Not yet run:** `compose.yaml` with external volumes, `tests/maintain-check.sh` against it, `tests/gates.sh`, the new CI smoke test and Trivy step | `docker compose config` accepts `compose.yaml` and `.env.example` (Compose 5.7.1); `gates.sh` and the workflow pass shellcheck and a YAML parse |
+
+### The Compose stack: what was verified
+
+Tested on Docker Engine 29.9.3 (Linux, x86-64) and Docker Compose 5.7.0 with the
+26.11 installer and the 14 Day Trial, in a test network whose way out is another
+proxy that passes HTTPS only. Apart from `tests/maintain-check.sh`, the scripts
+that ran these checks aren't in `tests/` yet.
+
+| Check | Status |
+|---|---|
+| A new site on six empty volumes: setup on the page, Fishbowl installed by the server container as uid 1000 (30 s), a company database created in Server Administration in the desktop container with **Host** left as `localhost` and the Password as Fishbowl filled it in, Fishbowl Server running 16 s after Server Administration closed; no file of the installation owned by root | Verified (through the edge and the page's WebSocket, the way a browser does it) |
+| An upgrade on the page to a stand-in newer version (the same installer named 2026.11.1): backup first, the installer as uid 1000, data kept, running and healthy afterwards | Verified. A real new Fishbowl version's database update wasn't exercised. |
+| The Restore tab: the 54 MB reference backup uploaded on the page and restored through `localhost` into the database container | Verified (368 tables in 66 s) |
+| Moving a single container's volumes into the stack: no setup, the page's access code kept, Fishbowl Server running 26 s after `docker compose up -d`, no refused first start | Verified. Going back to the single container wasn't run end to end. |
+| Every long-running container: non-root user, read-only image, no capabilities, `no-new-privileges`, no uid-0 process; no setuid or setgid files in the server, page and desktop images; no image carries the MySQL root password file; the server image has no compiler, GTK or X server | Verified. Trivy and Docker Bench for Security weren't run here. |
+| Networks: only the edge publishes ports (6080 on 127.0.0.1 only); `app` and `data` internal; the page isn't on `data` and can't reach MySQL; no direct way out from any Fishbowl container; root signs in only from `localhost` and the data network | Verified |
+| The egress proxy: Fishbowl Server's own calls arrive there; names off the list, IP addresses and other ports refused; `FB_EGRESS_EXTRA` | Verified. The test network's own proxy relays HTTPS only, so Fishbowl's plain-HTTP calls (80, 81) failed past the egress proxy here. |
+| HTTPS: the page over TLS with the edge's own certificate authority, Secure cookie, same-origin checks, TLS 1.1 and older refused; TLS for Clients on 2456 (`FB_CLIENT_TLS=edge`) reaches Fishbowl Server's web app and API | Verified. A Fishbowl Client signing in over Secure Connection, and a public certificate, weren't tested. |
+| Server Administration and the Client in the desktop container, drawn through the edge and the page at the browser's size; the Client signed in to Fishbowl Server in its own container | Verified |
+| A frozen Fishbowl Server (TCP still connects, HTTP doesn't answer): restarted in place 26 to 30 s after it froze, running again within a minute, 10 of 10 over two series | Verified |
+| The server container's main process killed from the host: Docker restarted it within 2.5 s and it was healthy again within 21 s, 10 of 10 over two series | Verified |
+| MySQL killed from the host (Docker restarts it within a second): Fishbowl Server restarted by itself and a Client could sign in afterwards, 6 of 6 over two series | Verified (before the fix, Fishbowl Server didn't notice and sign-ins failed) |
+| Four unplanned stops within ten minutes: Fishbowl Server stays stopped, the container stays up for the page | Verified |
+| Docker restarted, and once the test machine itself: every container healthy again with no command (25 to 30 s after a Docker restart; 62 s for Fishbowl Server after the machine's cold start) | Verified |
+| Start-up time: container start to healthy 16 to 23 s over ten restarts (two series of five) | Measured |
+| `FB_SERVER_XMX` in `.env` (for example `6g`): Fishbowl Server's heap at its next start, over Server Administration's memory setting; removed again, Server Administration's setting is back | Verified with `4096m` and `6g` (Java ran with that `-Xmx`, and the log says what changed), then back to 8192 MB |
+| Logs: every line timestamped in UTC, the same events in the same order over two restarts, no password or access code in any container's log, rotation set | Verified |
+| `docker compose down --volumes` keeps the six volumes; the dumps and settings files identical after a rebuild; Fishbowl back without setup | Verified |
+| The backup container: a set with every database, each company database alone, the settings files and the reports; owner-only; `--verify`; a damaged dump caught; a drill restore matching the live database row for row | Verified |
+| The weekly maintenance on the stack (`fishbowl-maintain.sh`): every image rebuilt with the package updates, a backup first, every container recreated on its new image and back where it was, the old images kept as `:previous`. A new Fishbowl Server image that never comes back: status 2, the new images kept as `:failed`, the containers' logs saved, every container back on the image it ran before | Verified *(`tests/maintain-check.sh`: 12 passed, 0 failed)*. Its first run here found that the backup step refused to run as the server container's user, so every weekly run stopped before changing anything; fixed. |
+| The same with `fishbowl-maintain.ps1` | Verified in PowerShell 7.4 on Linux, against the same Docker *(`tests/maintain-check.sh --powershell`: 12 passed, 0 failed)*. Its first run here found that the wait for the stack to come back counted a failure as success (a PowerShell function returns everything it writes along with its result), so a broken image would have stayed; fixed. Not run in Windows PowerShell 5.1, which the scheduled task uses, or on Windows. |
+| Fishbowl's own updates in the stack, Docker Desktop | **Not run** with the stack (Fishbowl's own updates need a purchased license) |
+

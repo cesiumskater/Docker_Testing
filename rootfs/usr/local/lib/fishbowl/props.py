@@ -2,11 +2,15 @@
 """Java .properties helper (eve.properties and install4j response files).
 
   props.py get FILE KEY   print the value of KEY (exit 1 if absent or empty)
+  props.py set FILE KEY   set KEY to the value read on stdin (added if absent),
+                          keeping the file's owner, mode and other lines
   props.py escape         read a value on stdin, print it escaped for a .properties file
 
-Values never travel on the command line: `escape` reads stdin, `get` prints to
-stdout for the caller to capture.
+Values never travel on the command line: `set` and `escape` read stdin, `get`
+prints to stdout for the caller to capture.
 """
+import os
+import re
 import sys
 
 
@@ -102,8 +106,34 @@ def escape(value):
     return "".join(out)
 
 
+def set_value(path, key, value):
+    """Replace KEY's (single-line) entry, or append one; atomic, same owner and mode."""
+    with open(path, encoding="latin-1") as f:
+        lines = f.read().splitlines()
+    entry = escape(key).replace("=", "\\=").replace(":", "\\:") + "=" + escape(value)
+    pattern = re.compile(r"^\s*" + re.escape(key) + r"\s*[=:]")
+    done, out = False, []
+    for line in lines:
+        if not done and pattern.match(line) and not line.rstrip().endswith("\\"):
+            out.append(entry)
+            done = True
+        else:
+            out.append(line)
+    if not done:
+        out.append(entry)
+    st = os.stat(path)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="latin-1") as f:
+        f.write("\n".join(out) + "\n")
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    os.replace(tmp, path)
+
+
 def main():
-    if len(sys.argv) == 4 and sys.argv[1] == "get":
+    if len(sys.argv) == 4 and sys.argv[1] == "set":
+        set_value(sys.argv[2], sys.argv[3], sys.stdin.read().rstrip("\n"))
+    elif len(sys.argv) == 4 and sys.argv[1] == "get":
         value = parse(sys.argv[2]).get(sys.argv[3], "")
         if not value:
             sys.exit(1)

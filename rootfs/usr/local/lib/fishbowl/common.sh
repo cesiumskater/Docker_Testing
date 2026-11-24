@@ -29,6 +29,12 @@ readonly MYSQL_CNF_DIR=/etc/my.cnf.d
 # stay read-only: /etc/my.cnf.d/50-fishbowl-tuning.cnf includes this folder.
 readonly FB_MYCNF_DIR=/run/fishbowl-mysql.d
 readonly FB_MYCNF_DST="$FB_MYCNF_DIR/50-fishbowl-server.cnf"
+# MySQL in its own container (the Compose stack, README "The Compose stack"):
+# FISHBOWL_DB_HOST names it, its root password comes from a file (a Compose
+# secret), and Fishbowl's tuning goes to a folder the database container reads.
+# Without FISHBOWL_DB_HOST, MySQL runs inside this container as always.
+readonly DB_HOST="${FISHBOWL_DB_HOST:-127.0.0.1}"
+readonly DB_CONF_DIR="${FISHBOWL_DB_CONF_DIR:-}"
 readonly DATA_DIR=/var/lib/fishbowl
 readonly STATE_DIR=/var/lib/fishbowl/state
 readonly BACKUP_DIR=/var/lib/fishbowl/backups
@@ -45,7 +51,9 @@ readonly INFO_FILE=/run/fishbowl/info                # facts for the page (versi
 readonly LAST_ERROR_FILE=/run/fishbowl/last-error    # why the last setup/upgrade/start attempt failed
 readonly PENDING_FLAG=/run/fishbowl/pending-settings # settings changed in Server Administration wait for a restart
 readonly INSTALLER_DIR=/opt/fishbowl-installer
-readonly JAVA21_HOME=/usr/lib/jvm/temurin-21-jdk
+# Java 21: the JDK in the single container, the JRE in the Compose stack's images
+# (each image sets JAVA_HOME).
+readonly JAVA21_HOME="${JAVA_HOME:-/usr/lib/jvm/temurin-21-jdk}"
 readonly FB_USER=fishbowl
 readonly LIB_DIR=/usr/local/lib/fishbowl
 readonly BIN_DIR=/usr/local/bin
@@ -56,7 +64,21 @@ readonly FIRST_PROMPT_TIMEOUT="$(( PROMPT_TIMEOUT < 300 ? PROMPT_TIMEOUT : 300 )
 # The Fishbowl page: a small web server (portal.py) that runs as its own user.
 readonly WEB_USER=fbweb
 readonly WEB_PORT=6080
-readonly WEB_SPOOL=/dev/shm/fishbowl-web             # requests from the page to this script (RAM only)
+# The role this container plays (README, "The Compose stack"): all (the single
+# container: everything, started as root), or one part of the split stack, each
+# started as its own user: server (Fishbowl Server, setup, upgrades), page (the
+# Fishbowl page) or desktop (the Server Administration and Client windows). The
+# parts share /run/fishbowl, a small in-memory volume: status, requests, sockets.
+readonly ROLE="${FISHBOWL_ROLE:-all}"
+case "$ROLE" in all|server|page|desktop) ;; *) echo "FISHBOWL_ROLE must be all, server, page or desktop (it's '$ROLE')." >&2; exit 2 ;; esac
+split_role() { [ "$ROLE" != all ]; }
+if [ "$ROLE" = all ]; then
+  readonly WEB_SPOOL=/dev/shm/fishbowl-web           # requests from the page to this script (RAM only)
+else
+  readonly WEB_SPOOL=/run/fishbowl/spool             # the same, on the shared in-memory volume
+fi
+readonly PAGE_DIR=/var/lib/fishbowl/page              # the page's own lasting state (split stack)
+readonly HEARTBEAT_FILE=/run/fishbowl/desktop-alive   # the desktop's loop touches it (split stack)
 readonly WEB_CODE_FILE=/var/lib/fishbowl/state/web-code
 readonly WEB_CODE_RUN=/run/fishbowl/web-code         # copy only the page's user can read
 # Browser windows (fishbowl-session): private sockets, no TCP ports.
@@ -78,8 +100,32 @@ readonly FISHBOWL_VERSION FISHBOWL_APP_VERSION FISHBOWL_INSTALLER FISHBOWL_EULA
 
 # ---------------------------------------------------------------- output ----
 _ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+# log_tag TAG: copies lines from stdin to stdout, each with a UTC timestamp and
+# [TAG] in front, the shape of every other line in `docker logs` (Fishbowl
+# Server's own console output becomes [fbserver] lines). bash's own clock, so no
+# process per line.
+log_tag() {
+  local line
+  export TZ=UTC0
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%(%Y-%m-%dT%H:%M:%S)TZ [%s] %s\n' -1 "$1" "$line"
+  done
+}
 log()  { printf '%s [fishbowl] %s\n' "$(_ts)" "$*"; }
-note() { printf '%s\n' "$*"; }
+# In the Compose stack's containers every line in `docker logs` starts with a UTC
+# timestamp and a tag, so a log collector can read them one event per line
+# (FISHBOWL_LOG_STAMPED, set by the entrypoint there and inherited by its jobs).
+# The single container keeps its framed blocks of text for people to read, and
+# `docker exec` sessions print plain text either way.
+stamped() { [ "${FISHBOWL_LOG_STAMPED:-0}" = 1 ]; }
+note() {
+  if stamped; then
+    [ -n "$*" ] || return 0
+    printf '%s [fishbowl] %s\n' "$(_ts)" "$*"
+  else
+    printf '%s\n' "$*"
+  fi
+}
 warn() { printf '%s [warning] %s\n' "$(_ts)" "$*" >&2; }
 # fail <exit-code> <message...>
 # When FAIL_NOTE_FILE is set (a setup or upgrade started from the page or a
@@ -87,7 +133,8 @@ warn() { printf '%s [warning] %s\n' "$(_ts)" "$*" >&2; }
 FAIL_NOTE_FILE=""
 fail() {
   local code="$1"; shift
-  printf '\n%s [error] %s\n\n' "$(_ts)" "$*" >&2
+  if stamped; then printf '%s [error] %s\n' "$(_ts)" "$*" >&2
+  else printf '\n%s [error] %s\n\n' "$(_ts)" "$*" >&2; fi
   if [ -n "$FAIL_NOTE_FILE" ]; then
     printf '%s\n' "$*" > "$FAIL_NOTE_FILE" 2>/dev/null || true
   fi
@@ -104,7 +151,7 @@ set_status() {
   printf '%s\n' "$1" > "$STATUS_FILE.tmp" && mv -f "$STATUS_FILE.tmp" "$STATUS_FILE"
 }
 current_status() { cat "$STATUS_FILE" 2>/dev/null || true; }
-hr() { printf '%s\n' "------------------------------------------------------------------------"; }
+hr() { stamped || printf '%s\n' "------------------------------------------------------------------------"; }
 
 is_interactive() { [ -t 0 ] && [ -t 1 ]; }
 
@@ -135,12 +182,13 @@ ask_secret() {
 # their own; ask_root_password_until_valid (upgrade.sh) tries this one first and
 # asks only when MySQL turns it down.
 default_root_password() {
-  local f="$LIB_DIR/mysql-root-password.txt" pw=""
-  [ -r "$f" ] || fail 1 "The MySQL root password file $f is missing from this image."
+  local f="${FISHBOWL_DB_ROOT_PASSWORD_FILE:-$LIB_DIR/mysql-root-password.txt}" pw=""
+  [ -r "$f" ] || fail 1 "The MySQL root password file $f is missing (README, \"The MySQL root password\")."
   IFS= read -r pw < "$f" || [ -n "$pw" ] || true
   [ -n "$pw" ] || fail 1 "The MySQL root password file $f is empty."
   printf '%s' "$pw"
 }
+db_external() { [ -n "${FISHBOWL_DB_HOST:-}" ]; }
 
 # A first-time setup or an upgrade must not run while update-all.sh is changing
 # packages (MySQL and Java are among them). Call this at the start of such a job;
@@ -157,8 +205,18 @@ wait_for_system_update() {
 # --------------------------------------------------------- run commands -----
 as_user() {  # as_user <user> <cmd...>   (keeps the environment we pass explicitly)
   local user="$1"; shift
+  if [ "$(id -u)" = "$(id -u "$user" 2>/dev/null)" ]; then "$@"; return; fi
   setpriv --reuid="$user" --regid="$user" --init-groups --inh-caps=-all -- "$@"
 }
+# drop_to USER: sets DROP to what goes in front of a command so it runs as USER:
+# setpriv when this script runs as root (the single container), nothing when it
+# already runs as that user (the split stack, where nothing starts as root).
+DROP=()
+drop_to() {
+  if [ "$(id -u)" = 0 ]; then DROP=(setpriv --reuid="$1" --regid="$1" --init-groups --inh-caps=-all --)
+  else DROP=(); fi
+}
+am_root() { [ "$(id -u)" = 0 ]; }
 
 ver_gt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
 
@@ -177,10 +235,110 @@ random_code() {  # random_code <length>: letters and digits that are hard to mix
 # --------------------------------------------------- Java properties files --
 props_get() { python3 -I "$LIB_DIR/props.py" get "$1" "$2"; }    # props_get FILE KEY
 props_escape() { python3 -I "$LIB_DIR/props.py" escape; }          # value on stdin
+props_set() { printf '%s' "$3" | python3 -I "$LIB_DIR/props.py" set "$1" "$2"; }   # props_set FILE KEY VALUE
 
 eve_get() { [ -f "$FB_EVE" ] && props_get "$FB_EVE" "$1" 2>/dev/null; }
 database_configured() { local n; n="$(eve_get dbName || true)"; [ -n "$n" ]; }
 client_port() { local p; p="$(eve_get webPort || true)"; printf '%s\n' "${p:-2456}"; }
+
+# The Fishbowl Client in its window connects to Fishbowl Server by the address in
+# client.properties: localhost in the single container, the server container's
+# name (FISHBOWL_SERVER_HOST, default fishbowl) in the split stack.
+client_point_server() {
+  local f="$FB_HOME/client/bin/client.properties" want key cur
+  [ -f "$f" ] || return 0
+  if split_role; then want="${FISHBOWL_SERVER_HOST:-fishbowl}"; else want=localhost; fi
+  for key in ServerAddress CheckoutServerAddress; do
+    cur="$(props_get "$f" "$key" 2>/dev/null || true)"
+    # Back in the single container, only the stack's own value is put back.
+    if [ "$cur" != "$want" ] && { split_role || [ "$cur" = "${FISHBOWL_SERVER_HOST:-fishbowl}" ]; }; then
+      props_set "$f" "$key" "$want"
+    fi
+  done
+}
+
+# Java's proxy settings for Fishbowl's own programs, when FISHBOWL_EGRESS_PROXY
+# names the egress proxy (host:port, the Compose stack). JAVA_TOOL_OPTIONS reaches
+# every Java that Fishbowl starts, its updater included, so they all go out
+# through the proxy; the stack's own names (and this container) stay direct.
+java_proxy_opts() {
+  local p="${FISHBOWL_EGRESS_PROXY:-}" host port
+  [ -n "$p" ] || return 0
+  if ! [[ "$p" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]]; then
+    warn "FISHBOWL_EGRESS_PROXY must be host:port; '$p' is ignored, so Fishbowl has no way out."
+    return 0
+  fi
+  host="${p%:*}"; port="${p##*:}"
+  printf -- '-Dhttp.proxyHost=%s -Dhttp.proxyPort=%s -Dhttps.proxyHost=%s -Dhttps.proxyPort=%s -Dhttp.nonProxyHosts=localhost|127.*|[::1]|%s|fishbowl|db|edge' \
+    "$host" "$port" "$host" "$port" "$(hostname 2>/dev/null || echo fishbowl)"
+}
+# ---------------------------------------------- Fishbowl's own updates -----
+# Fishbowl can update itself (Server Administration -> Server -> Auto Updates):
+# it downloads update packages into updates/, stops, and its updater copies the
+# new files in, then runs server/bin/eve.sh to start Fishbowl Server again. The
+# container puts a stub in place of eve.sh (eve.sh.stub: it only leaves a request
+# in NATIVE_DIR) and the supervisor does the rest: a backup before a package is
+# applied, no start while the updater works, the server started the normal way.
+readonly FB_UPDATES_DIR="$FB_HOME/updates"
+readonly FB_APPLY_FILE="$FB_UPDATES_DIR/applyUpdates.tmp"
+readonly FB_EVE_SH="$FB_BIN/eve.sh"
+readonly NATIVE_DIR="$RUN_DIR/native"
+readonly NATIVE_RESTART_FILE="$NATIVE_DIR/restart-requested"
+
+# FISHBOWL_NATIVE_UPDATES=1: Fishbowl updating itself is expected here (no
+# warning about it, and an image with an older installer isn't a downgrade).
+native_updates_on() { [ "${FISHBOWL_NATIVE_UPDATES:-0}" = 1 ]; }
+# FISHBOWL_CONTAINERIZED=1 passes Fishbowl's own container switch,
+# FishbowlContainerized=true. Fishbowl reads it with Boolean.parseBoolean, so
+# only "true" works ("1" would be off). With it on, Fishbowl refuses its own
+# database backups and skips the one it takes before a database update, so it
+# belongs with the stack's backup container (README, "Fishbowl's own updates").
+containerized_value() { [ "${FISHBOWL_CONTAINERIZED:-0}" = 1 ] && echo true || echo false; }
+# Update packages Fishbowl downloaded and hasn't applied yet.
+native_update_zips() { find "$FB_UPDATES_DIR" -maxdepth 1 -type f -name '*.zip' 2>/dev/null | sort; }
+native_update_pending() { [ -n "$(native_update_zips)" ]; }
+# Fishbowl's updater (fb-updater-x.jar) at work, as Fishbowl's user.
+native_updater_running() { pgrep -u "$FB_USER" -f 'fb-updater' >/dev/null 2>&1; }
+# The Fishbowl version its program files carry now (eve-26.11.jar -> 26.11). The
+# installer's record (installed_app_version) doesn't change when Fishbowl updates itself.
+running_app_version() {
+  find "$FB_HOME/lib" -maxdepth 1 -name 'eve-[0-9]*.jar' -printf '%f\n' 2>/dev/null |
+    sed -n 's/^eve-\([0-9][0-9.]*[0-9]\)\.jar$/\1/p' | sort -V | tail -n 1
+}
+# Before every start of Fishbowl Server: the stub in place of eve.sh (an update
+# may have brought the original back), and the folder the stub writes to.
+native_prepare() {
+  mkdir -p "$NATIVE_DIR"
+  chown "$FB_USER:$FB_USER" "$NATIVE_DIR"
+  chmod 0700 "$NATIVE_DIR"
+  [ -d "$FB_BIN" ] || return 0
+  if ! cmp -s "$LIB_DIR/eve.sh.stub" "$FB_EVE_SH"; then
+    install -m 0755 -o "$FB_USER" -g "$FB_USER" "$LIB_DIR/eve.sh.stub" "$FB_EVE_SH" ||
+      warn "Couldn't put the container's eve.sh in place; Fishbowl's own updates would start a second server."
+  fi
+}
+# Fishbowl Server processes the supervisor didn't start (an update that brought
+# back Fishbowl's own eve.sh and ran it): stopped, so the supervisor's start is
+# the only one.
+native_stray_servers() {  # prints their PIDs
+  # Fishbowl Server's Java has "-ccom.evnt.eve.Eve" among its arguments, both from
+  # the service launcher and from eve.sh; Server Administration's doesn't.
+  pgrep -u "$FB_USER" -f '[-]ccom\.evnt\.eve\.Eve( |$)' 2>/dev/null || true
+}
+
+# Fishbowl's Linux service launcher starts Fishbowl Server with a Java debugger
+# agent (JDWP) listening on 127.0.0.1:7770. Anything that can reach that port can
+# run code as Fishbowl's user, and nothing in Fishbowl needs it, so it's taken
+# out of the launcher before every start (an upgrade brings it back).
+strip_debug_agent() {
+  local f="$FB_SERVICE_LAUNCHER"
+  [ -f "$f" ] || return 0
+  grep -q 'Xrunjdwp' "$f" || return 0
+  sed -i -e 's/ "-Xdebug"//g' -e 's/ "-Xnoagent"//g' -e 's/ "-Xrunjdwp:[^"]*"//g' "$f" ||
+    { warn "Couldn't take the Java debugger agent (port 7770) out of $f."; return 0; }
+  log "Took the Java debugger agent (JDWP, 127.0.0.1:7770) out of Fishbowl's service launcher."
+}
+
 # Fishbowl's installer registers a trial under the name "Trial" (26.9.1 wrote "TRIAL").
 # Entering a purchased license in Server Administration replaces the name.
 installed_is_trial() {
@@ -276,6 +434,7 @@ mysql_prepare_dirs() {
 }
 
 mysql_start() {  # starts mysqld in its own session; waits until it accepts connections
+  if db_external; then db_wait_external; return 0; fi
   mysql_prepare_dirs
   # A mysqld that was killed (power loss, docker rm -f, a crash) leaves its socket
   # lock files behind. They hold its old process number, and when that number
@@ -308,7 +467,7 @@ mysql_start() {  # starts mysqld in its own session; waits until it accepts conn
 }
 
 mysql_stop() {  # clean shutdown (SIGTERM is MySQL's normal shutdown signal)
-  [ -n "$MYSQLD_PID" ] || return 0
+  [ -n "${MYSQLD_PID:-}" ] || return 0
   if kill -0 "$MYSQLD_PID" 2>/dev/null; then
     kill -TERM "$MYSQLD_PID" 2>/dev/null || true
     for _ in $(seq 1 120); do
@@ -324,14 +483,116 @@ mysql_stop() {  # clean shutdown (SIGTERM is MySQL's normal shutdown signal)
   MYSQLD_PID=""
 }
 
-mysql_is_up() { mysqladmin --protocol=socket --socket="$MYSQL_SOCKET" ping --silent >/dev/null 2>&1; }
+mysql_is_up() {
+  if db_external; then
+    # Without credentials: mysqladmin ping answers 0 for a running server even when
+    # it turns the sign-in down, so this never needs the password.
+    mysqladmin --protocol=tcp -h "$DB_HOST" -P 3306 --connect-timeout=3 ping --silent >/dev/null 2>&1
+  else
+    mysqladmin --protocol=socket --socket="$MYSQL_SOCKET" ping --silent >/dev/null 2>&1
+  fi
+}
+
+# The connection id MySQL hands a new connection, read from its greeting (no
+# sign-in). It only grows while MySQL runs and starts again from a few after every
+# start, so a smaller number than last time means MySQL restarted in between,
+# even when it was back too fast for a check to see it gone. Prints nothing when
+# MySQL doesn't greet (not up, or busy refusing connections).
+db_conn_id() {
+  python3 -I - "$DB_HOST" 2>/dev/null <<'PY'
+import socket, struct, sys
+s = socket.create_connection((sys.argv[1], 3306), timeout=3)
+s.settimeout(3)
+data = b""
+while len(data) < 4 or len(data) < 4 + int.from_bytes(data[:3], "little"):
+    chunk = s.recv(512)
+    if not chunk:
+        break
+    data += chunk
+s.close()
+p = data[4:]
+if not p or p[0] != 10:   # protocol 10 greeting; 0xff would be an error packet
+    sys.exit(1)
+end = p.index(b"\0", 1)
+print(struct.unpack("<I", p[end + 1:end + 5])[0])
+PY
+}
+
+# MySQL in its own container: wait for it (it may still be starting, or restarting
+# after a crash), then point Fishbowl at it. No time limit: without the database
+# there's nothing to start, and the page says what's going on.
+db_wait_external() {
+  local waited=0 db_pw="" _
+  MYSQLD_PID=""
+  if ! mysql_is_up; then
+    log "Waiting for the database container ($DB_HOST:3306) to accept connections"
+    while ! mysql_is_up; do
+      sleep 2
+      waited=$((waited + 2))
+      if [ $((waited % 120)) = 0 ]; then
+        warn "The database container ($DB_HOST:3306) still isn't answering after ${waited}s: docker compose ps db; docker logs fishbowl-db"
+      fi
+    done
+  fi
+  # On a data directory from the single container, the database container adds
+  # root's account for its network a moment after MySQL starts; until then MySQL
+  # answers but turns root down, and Fishbowl Server would start only to be
+  # refused. So wait (up to a minute) until root can sign in. An installation with
+  # a root password of its own never can with this one: it just goes on.
+  if [ -r "${FISHBOWL_DB_ROOT_PASSWORD_FILE:-}" ]; then
+    db_pw="$(default_root_password)"
+    for _ in $(seq 1 30); do
+      mysql_root db_pw -N -B -e 'SELECT 1' >/dev/null 2>&1 && break
+      sleep 2
+    done
+    db_pw=""
+  fi
+  db_point_fishbowl
+}
+
+# Fishbowl keeps the database host in eve.properties and, per database, in
+# dbsettings.properties; Server Administration writes "localhost" there. In the
+# stack it's the database container, set before every start of Fishbowl Server.
+db_point_fishbowl() {
+  local want="$DB_HOST"
+  if ! db_external; then
+    # Back in the single container after the Compose stack: only the stack's own
+    # value (db) is put back to this container's MySQL.
+    [ -f "$FB_EVE" ] && [ "$(props_get "$FB_EVE" dbHost 2>/dev/null || true)" = db ] || return 0
+    want=localhost
+    log "Fishbowl's settings pointed at the Compose stack's database container; pointing them at this container's MySQL (localhost)"
+  fi
+  if [ -f "$FB_EVE" ] && [ "$(props_get "$FB_EVE" dbHost 2>/dev/null || true)" != "$want" ]; then
+    props_set "$FB_EVE" dbHost "$want"
+  fi
+  if [ -f "$FB_BIN/dbsettings.properties" ]; then
+    python3 -I - "$FB_BIN/dbsettings.properties" "$want" <<'PY' || warn "Couldn't set the database host in dbsettings.properties."
+import json, os, sys
+path, host = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    text = f.read()
+data = json.loads(text) if text.strip() else []
+if isinstance(data, list) and any(isinstance(d, dict) and d.get("host") != host for d in data):
+    for d in data:
+        if isinstance(d, dict):
+            d["host"] = host
+    st = os.stat(path)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, separators=(",", ":"))
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    os.replace(tmp, path)
+PY
+  fi
+}
 
 # mysql_root <password-var-name> <mysql args...>  -- runs the client as root over TCP,
 # the way Fishbowl connects. The password goes through MYSQL_PWD for this one
 # process only (no command line, no disk).
 mysql_root() {
   local __pwvar="$1"; shift
-  MYSQL_PWD="${!__pwvar}" mysql --protocol=tcp -h 127.0.0.1 -P 3306 -u root "$@"
+  MYSQL_PWD="${!__pwvar}" mysql --protocol=tcp -h "$DB_HOST" -P 3306 -u root "$@"
 }
 
 sql_quote() {  # escape for a single-quoted SQL string literal (sql_mode has no NO_BACKSLASH_ESCAPES)
@@ -344,16 +605,25 @@ sql_quote() {  # escape for a single-quoted SQL string literal (sql_mode has no 
 # settings the guide controls (sql-mode and lower_case_table_names live in
 # 90-fishbowl.cnf, which also sorts later so it would win anyway).
 apply_fishbowl_mycnf() {
-  local src="$FB_BIN/my.cnf" tmp
-  mkdir -p "$FB_MYCNF_DIR"
+  local src="$FB_BIN/my.cnf" tmp dst="$FB_MYCNF_DST"
+  # In the stack, the database container reads the file from a shared volume at
+  # its next start (docker compose restart db after a Fishbowl upgrade).
+  if db_external; then
+    [ -n "$DB_CONF_DIR" ] || return 0
+    dst="$DB_CONF_DIR/50-fishbowl-server.cnf"
+  fi
+  mkdir -p "$(dirname "$dst")"
   if [ ! -f "$src" ]; then
-    rm -f "$FB_MYCNF_DST"
+    rm -f "$dst"
     warn "Fishbowl's server/bin/my.cnf was not found; MySQL runs without Fishbowl's tuning."
     return 0
   fi
   tmp="$(mktemp)"
   python3 -I "$LIB_DIR/mycnf.py" "$src" > "$tmp"
-  install -m 0644 -o root -g root "$tmp" "$FB_MYCNF_DST"
+  if ! cmp -s "$tmp" "$dst"; then
+    if am_root; then install -m 0644 -o root -g root "$tmp" "$dst"; else install -m 0644 "$tmp" "$dst"; fi
+    db_external && log "Fishbowl's MySQL tuning is in $dst; the database container uses it from its next start."
+  fi
   rm -f "$tmp"
 }
 
@@ -400,8 +670,11 @@ apply_pending_settings() {
 # away in Fishbowl's file chooser. Only plain files and folders are touched.
 prepare_import_dir() {
   mkdir -p "$IMPORT_DIR" "$HOMES_DIR/$FB_USER"
-  find "$IMPORT_DIR" -xdev \( -type f -o -type d \) \( ! -user "$FB_USER" -o ! -group "$WEB_USER" \) \
-    -exec chown "$FB_USER:$WEB_USER" {} + 2>/dev/null || true
+  # The split stack's page runs in Fishbowl's group (it has no root to chown with).
+  if am_root; then
+    find "$IMPORT_DIR" -xdev \( -type f -o -type d \) \( ! -user "$FB_USER" -o ! -group "$WEB_USER" \) \
+      -exec chown "$FB_USER:$WEB_USER" {} + 2>/dev/null || true
+  fi
   find "$IMPORT_DIR" -xdev -mindepth 1 -type f ! -perm -0640 -exec chmod u+rw,g+r {} + 2>/dev/null || true
   chmod 2770 "$IMPORT_DIR"
   if [ ! -e "$HOMES_DIR/$FB_USER/import" ] && [ ! -L "$HOMES_DIR/$FB_USER/import" ]; then
@@ -455,42 +728,32 @@ xmx_of() { grep -E '^-Xmx' "$1" 2>/dev/null | tail -n 1 | sed 's/^-Xmx//' || tru
 # Carry the value over before each start so the setting takes effect.
 sync_server_memory() {
   local src="$FB_BIN/Fishbowl_Server_Service.vmoptions" dst="$FB_BIN/Fishbowl Server Service.vmoptions"
-  local want have
-  [ -f "$src" ] || return 0
-  [ -z "${FISHBOWL_SERVER_XMX:-}" ] || return 0   # the heap comes from .env instead (apply_server_xmx)
-  want="$(xmx_of "$src")"
+  local want="" have why="Server Administration's setting"
+  # FISHBOWL_SERVER_XMX (FB_SERVER_XMX in the Compose stack's .env), when set,
+  # wins over Server Administration's memory field: it's written before every
+  # start. Unset (again), Server Administration's value stands: the Windows-named
+  # file once it has changed the memory, else "Fishbowl Server.vmoptions", which
+  # setup and Server Administration both write.
+  if [ -n "${FISHBOWL_SERVER_XMX:-}" ]; then
+    if [[ "$FISHBOWL_SERVER_XMX" =~ ^[1-9][0-9]*[mMgG]$ ]]; then
+      want="$FISHBOWL_SERVER_XMX"; why="set by FISHBOWL_SERVER_XMX"
+    else
+      warn "FISHBOWL_SERVER_XMX must look like 4096m or 6g; '$FISHBOWL_SERVER_XMX' is ignored."
+    fi
+  fi
+  if [ -z "$want" ]; then
+    if [ -f "$src" ]; then want="$(xmx_of "$src")"; else want="$(xmx_of "$FB_BIN/Fishbowl Server.vmoptions")"; fi
+  fi
+  [ -f "$dst" ] || return 0
   have="$(xmx_of "$dst")"
   [ -n "$want" ] && [ "$want" != "$have" ] || return 0
-  if [ -f "$dst" ] && grep -qE '^-Xmx' "$dst"; then
+  if grep -qE '^-Xmx' "$dst"; then
     sed -i -E "s/^-Xmx.*/-Xmx${want}/" "$dst"
   else
     printf -- '-Xmx%s\n' "$want" >> "$dst"
   fi
-  chown "$FB_USER:$FB_USER" "$dst"
-  log "Server memory changed in Server Administration: now ${want} (was ${have:-unset})"
-}
-
-# FISHBOWL_SERVER_XMX (compose.yaml: FB_SERVER_XMX in .env) sets Fishbowl Server's
-# heap from outside, such as 6144m or 6g. Written into the file the service
-# launcher reads before every start, so it wins over Server Administration's
-# "Server memory" while it's set. Empty: Server Administration's value stands.
-apply_server_xmx() {
-  local want="${FISHBOWL_SERVER_XMX:-}" dst="$FB_BIN/Fishbowl Server Service.vmoptions" have
-  [ -n "$want" ] || return 0
-  if ! [[ "$want" =~ ^[1-9][0-9]{0,6}[mMgG]$ ]]; then
-    warn "FISHBOWL_SERVER_XMX=$want isn't a size like 6144m or 6g; Server Administration's server memory applies instead."
-    return 0
-  fi
-  [ -d "$FB_BIN" ] || return 0
-  have="$(xmx_of "$dst")"
-  [ "$have" != "$want" ] || return 0
-  if [ -f "$dst" ] && grep -qE '^-Xmx' "$dst"; then
-    sed -i -E "s/^-Xmx.*/-Xmx${want}/" "$dst"
-  else
-    printf -- '-Xmx%s\n' "$want" >> "$dst"
-  fi
-  chown "$FB_USER:$FB_USER" "$dst"
-  log "Server memory set from FISHBOWL_SERVER_XMX: -Xmx${want} (was ${have:-unset}); Server Administration's value doesn't apply while it's set"
+  am_root && chown "$FB_USER:$FB_USER" "$dst"
+  log "Server memory: now ${want} (was ${have:-unset}), $why"
 }
 
 verify_memory_settings() {  # fails if 8192 / 2048 did not take effect
@@ -522,13 +785,21 @@ clear_installer_tmp() {
 }
 
 run_installer() {  # run_installer <varfile> <logfile>
-  local varfile="$1" logfile="$2" rc=0
+  local varfile="$1" logfile="$2" rc=0 vm_params=""
   # The installer unpacks into <temp>/<name>.<PID>.dir. PIDs repeat in a fresh
   # container, so leftovers from an interrupted run must go first, or gunzip
   # stops to ask whether to overwrite them.
   clear_installer_tmp
   mkdir -p "$HOMES_DIR/root"
   chmod 0700 "$HOMES_DIR/root"
+  # Where the image points the installer's systemd unit file (see the Dockerfile).
+  if [ -L /etc/systemd/system ]; then mkdir -p "$(readlink /etc/systemd/system)" 2>/dev/null || true; fi
+  # Fishbowl's installer stops unless it runs as root ("You must be logged in as
+  # root"), and all it looks at is Java's user.name (install4j's UnixUserInfo).
+  # In the Compose stack nothing runs as root, so the installer is given the name
+  # it wants: it still runs as Fishbowl's user and writes only where that user
+  # can (Fishbowl's volumes and /tmp).
+  am_root || vm_params="-Duser.name=root"
   (
     cd "$INSTALLER_TMP"
     # HOME on the data volume keeps install4j's own records (previous install
@@ -537,6 +808,7 @@ run_installer() {  # run_installer <varfile> <logfile>
     exec env -i PATH="$JAVA21_HOME/bin:/usr/local/bin:/usr/bin:/bin" HOME="$HOMES_DIR/root" \
       LANG="${LANG:-C.UTF-8}" TZ="${TZ:-UTC}" INSTALL4J_TEMP="$INSTALLER_TMP" \
       INSTALL4J_JAVA_HOME_OVERRIDE="$JAVA21_HOME" INSTALL4J_JAVA_HOME="$JAVA21_HOME" \
+      ${vm_params:+"INSTALL4J_ADD_VM_PARAMS=$vm_params"} \
       sh "$FISHBOWL_INSTALLER" -q -varfile "$varfile" -dir "$FB_HOME" </dev/null
   ) >>"$logfile" 2>&1 || rc=$?
   clear_installer_tmp
@@ -579,26 +851,43 @@ print_run_command() {  # print_run_command [docker-only]
 # their own passwords.
 web_code() { head -n 1 "$WEB_CODE_RUN" 2>/dev/null | tr -dc 'A-Z0-9-' || true; }
 web_code_init() {  # web_code_init [new]: makes sure a code exists and the page's user can read it
-  local code="" raw
+  local code="" raw keep="$WEB_CODE_FILE"
   mkdir -p "$RUN_DIR"
-  if [ "${1:-}" != new ] && [ -f "$WEB_CODE_FILE" ]; then
-    code="$(head -n 1 "$WEB_CODE_FILE" | tr -dc 'A-Z0-9-' || true)"
+  # The split stack's page keeps its code in its own folder and runs as itself: its
+  # copy in /run/fishbowl is readable by Fishbowl's group too, for fishbowl-link.
+  if split_role; then keep="$PAGE_DIR/web-code"; fi
+  if [ "${1:-}" != new ] && [ -f "$keep" ]; then
+    code="$(head -n 1 "$keep" | tr -dc 'A-Z0-9-' || true)"
   fi
   if ! [[ "$code" =~ ^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$ ]]; then
     raw="$(random_code 12)"
     [ "${#raw}" = 12 ] || fail 1 "Could not generate an access code for the Fishbowl page."
     code="${raw:0:4}-${raw:4:4}-${raw:8:4}"
-    if [ -d "$STATE_DIR" ]; then
-      ( umask 077; printf '%s\n' "$code" > "$WEB_CODE_FILE.tmp" ) && mv -f "$WEB_CODE_FILE.tmp" "$WEB_CODE_FILE"
+    if [ -d "$(dirname "$keep")" ]; then
+      ( umask 077; printf '%s\n' "$code" > "$keep.tmp" ) && mv -f "$keep.tmp" "$keep"
     fi
   fi
   ( umask 077; printf '%s\n' "$code" > "$WEB_CODE_RUN.tmp" )
-  chown "$WEB_USER:$WEB_USER" "$WEB_CODE_RUN.tmp"
-  chmod 0400 "$WEB_CODE_RUN.tmp"
+  if am_root; then
+    chown "$WEB_USER:$WEB_USER" "$WEB_CODE_RUN.tmp"
+    chmod 0400 "$WEB_CODE_RUN.tmp"
+  else
+    chmod 0440 "$WEB_CODE_RUN.tmp"
+  fi
   mv -f "$WEB_CODE_RUN.tmp" "$WEB_CODE_RUN"
 }
 page_url() {  # page_url [path]  ->  http://localhost:6080/<path>?code=...
   printf 'http://localhost:%s/%s?code=%s\n' "$WEB_PORT" "${1:-}" "$(web_code)"
+}
+# The page's address on your network, when the Compose stack's HTTPS edge serves
+# it (FISHBOWL_PAGE_URL, for example https://fishbowl.example.com/); empty otherwise.
+page_url_lan() {  # page_url_lan [path]
+  local base="${FISHBOWL_PAGE_URL:-}"
+  [ -n "$base" ] || return 0
+  [[ "$base" =~ ^https?://[A-Za-z0-9.:-]+/?$ ]] || return 0
+  base="${base%/}"
+  base="${base%:443}"   # https://host:443 is https://host
+  printf '%s/%s?code=%s\n' "$base" "${1:-}" "$(web_code)"
 }
 print_page_link() {
   hr

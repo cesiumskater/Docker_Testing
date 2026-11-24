@@ -1,0 +1,12 @@
+# Fishbowl Advanced: the settings its install guide requires (Step 3), for MySQL
+# in its own container. The same values as the single-container image's
+# /etc/my.cnf.d/90-fishbowl.cnf.
+#
+# lower_case_table_names=1 can only be set when the data directory is created;
+# the database container also passes it on its command line, so a first start
+# on an empty volume makes it right.
+[mysqld]
+lower_case_table_names=1
+sql-mode="STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"
+# Fishbowl never uses MySQL's X Protocol (33060); don't listen on it.
+mysqlx=OFF

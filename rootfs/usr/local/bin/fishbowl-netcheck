@@ -10,13 +10,17 @@
 #                                             for the container log, only when something
 #                                             Fishbowl uses can't be reached
 #
-# Exit status: 0 when every server Fishbowl uses answered and nothing outside the
-# inbound allowlist (2456, 28192, 6080) listens for the network; 1 otherwise.
+# Exit status: 0 when every server Fishbowl uses answered, nothing outside the
+# inbound allowlist (2456, 28192, 6080) listens for the network, and (behind the
+# egress proxy) there's no way out except the proxy; 1 otherwise.
 #
-# There is no firewall inside the container: everything may go out, and Docker
-# lets in only the ports you publish (-p). So a server that can't be reached is
-# blocked outside the container (this computer's firewall, the router, the
-# network), and this report says which.
+# Run alone (docker run), the container has no firewall inside: everything may go
+# out, and Docker lets in only the ports you publish (-p). A server that can't be
+# reached is then blocked outside the container (this computer's firewall, the
+# router, the network), and this report says which.
+# In the Compose stack, FISHBOWL_EGRESS_PROXY names the egress proxy (host:port):
+# the container's network has no route out, every name is tried through the proxy,
+# and a direct connection that works is reported as a hole.
 
 # shellcheck source=/usr/local/lib/fishbowl/common.sh
 . /usr/local/lib/fishbowl/common.sh
@@ -26,12 +30,12 @@ MODE=report
 case "${1:-}" in
   --log) MODE=log ;;
   ""|--report) ;;
-  -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) fail 2 "Usage: fishbowl-netcheck [--log]" ;;
 esac
 
-# The outbound allowlist: what Fishbowl 26.10 contacts, by the names in its own
-# program files (Fishbowl's help site publishes no list of its outbound servers).
+# The outbound allowlist: what Fishbowl 26.10 and 26.11 contact (the same names in
+# both), by the names in their own program files (Fishbowl's help site publishes no list of its outbound servers).
 # Fishbowl uses the names, so the addresses behind them can change; firewall
 # rules by name keep working when they do.
 NAMED=(
@@ -63,14 +67,60 @@ probe() {
   esac
 }
 
+# probe_proxy HOST PORT -> "<status> via-proxy": the same question, asked of the
+# egress proxy. 443 is a CONNECT tunnel; 80 and 81 are plain HTTP, so the proxy
+# fetches the page itself. Squid marks its own refusals with X-Squid-Error, which
+# tells "the proxy said no" (denied) apart from "the server didn't answer".
+probe_proxy() {
+  timeout 10 bash -c '
+    host="$1" port="$2" ph="$3" pp="$4" first="" line="" err=""
+    exec 3<>"/dev/tcp/$ph/$pp" 2>/dev/null || { echo "no-proxy via-proxy"; exit; }
+    if [ "$port" = 443 ]; then
+      printf "CONNECT %s:%s HTTP/1.1\r\nHost: %s:%s\r\n\r\n" "$host" "$port" "$host" "$port" >&3
+    else
+      printf "HEAD http://%s:%s/ HTTP/1.1\r\nHost: %s:%s\r\nConnection: close\r\n\r\n" "$host" "$port" "$host" "$port" >&3
+    fi
+    IFS= read -r first <&3 || { echo "no-answer via-proxy"; exit; }
+    while IFS= read -r line <&3; do
+      line="${line%$'"'"'\r'"'"'}"
+      [ -z "$line" ] && break
+      case "$line" in [Xx]-[Ss]quid-[Ee]rror:*) err="${line#*: }" ;; esac
+    done
+    code="$(printf "%s" "$first" | cut -d" " -f2)"
+    case "$err" in
+      ERR_ACCESS_DENIED*)            echo "denied via-proxy" ;;
+      ERR_DNS_FAIL*)                 echo "no-name via-proxy" ;;
+      ERR_CONNECT_FAIL*)             echo "refused via-proxy" ;;
+      "")  case "$code" in [1-5][0-9][0-9]) echo "reachable via-proxy" ;; *) echo "no-answer via-proxy" ;; esac ;;
+      *)                             echo "no-answer via-proxy" ;;
+    esac
+  ' _ "$1" "$2" "${PROXY%:*}" "${PROXY##*:}" || echo "no-answer via-proxy"
+}
+
+PROXY="${FISHBOWL_EGRESS_PROXY:-}"
+if [ -n "$PROXY" ] && ! [[ "$PROXY" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]]; then
+  fail 2 "FISHBOWL_EGRESS_PROXY must be host:port (it's '$PROXY')."
+fi
+
 # All at once, so the whole check takes about five seconds.
 i=0
 for entry in "${NAMED[@]}"; do
   IFS='|' read -r host port _ <<<"$entry"
-  probe "$host" "$port" > "$TMP/$i" &
+  if [ -n "$PROXY" ]; then probe_proxy "$host" "$port" > "$TMP/$i" &
+  else probe "$host" "$port" > "$TMP/$i" &
+  fi
   i=$((i + 1))
 done
+# Behind the proxy there must be no other way out: try one of the same servers
+# directly, by the address the proxy's own lookup would use, else by name.
+DIRECT=""
+if [ -n "$PROXY" ]; then
+  probe artanis.fishbowldev.com 443 > "$TMP/direct" &
+fi
 wait
+if [ -n "$PROXY" ]; then
+  read -r DIRECT _ < "$TMP/direct"
+fi
 
 words() {
   case "$1" in
@@ -78,6 +128,8 @@ words() {
     refused)   echo "REFUSED" ;;
     no-answer) echo "NO ANSWER" ;;
     no-name)   echo "NO DNS NAME" ;;
+    denied)    echo "DENIED" ;;
+    no-proxy)  echo "NO PROXY" ;;
     *)         echo "?" ;;
   esac
 }
@@ -89,12 +141,23 @@ for entry in "${NAMED[@]}"; do
   NAMED_LINES+=("$(printf '  %-12s %-34s %-16s %s' "$(words "$status")" "$host:$port" "$addr" "$what")")
   [ "$status" = reachable ] || BAD+=("$host:$port ($(words "$status" | tr 'A-Z' 'a-z'))")
 done
+HOLE=0
+[ -n "$PROXY" ] && [ "$DIRECT" = reachable ] && HOLE=1
 if [ "$MODE" = log ]; then
-  if [ "${#BAD[@]}" -gt 0 ]; then
-    warn "Fishbowl's servers can't be reached from this container: ${BAD[*]}. Licenses, plugins and the Integrations group need them; something outside the container blocks them (this computer's firewall, the router or the network). Details: docker exec fishbowl fishbowl-netcheck"
-    exit 1
+  rc=0
+  if [ "$HOLE" = 1 ]; then
+    warn "This container can reach the internet directly, around the egress proxy ($PROXY): its network isn't the internal one compose.yaml sets up. Details: docker exec fishbowl fishbowl-netcheck"
+    rc=1
   fi
-  exit 0
+  if [ "${#BAD[@]}" -gt 0 ]; then
+    if [ -n "$PROXY" ]; then
+      warn "Fishbowl's servers can't be reached through the egress proxy ($PROXY): ${BAD[*]}. Licenses, plugins and the Integrations group need them. Details: docker exec fishbowl fishbowl-netcheck, and docker logs fishbowl-egress"
+    else
+      warn "Fishbowl's servers can't be reached from this container: ${BAD[*]}. Licenses, plugins and the Integrations group need them; something outside the container blocks them (this computer's firewall, the router or the network). Details: docker exec fishbowl fishbowl-netcheck"
+    fi
+    rc=1
+  fi
+  exit "$rc"
 fi
 
 # The ports something listens on for the network: every listening socket except
@@ -117,8 +180,20 @@ port_name() {
   esac
 }
 
-note "Fishbowl's servers, by the names Fishbowl $FISHBOWL_APP_VERSION uses (outbound from this container):"
+if [ -n "$PROXY" ]; then
+  note "Fishbowl's servers, by the names Fishbowl $FISHBOWL_APP_VERSION uses, through the egress proxy ($PROXY):"
+else
+  note "Fishbowl's servers, by the names Fishbowl $FISHBOWL_APP_VERSION uses (outbound from this container):"
+fi
 printf '%s\n' "${NAMED_LINES[@]}"
+if [ -n "$PROXY" ]; then
+  if [ "$HOLE" = 1 ]; then
+    note "  HOLE: artanis.fishbowldev.com:443 also answered DIRECTLY, around the proxy. This"
+    note "  container's network must be the internal one compose.yaml sets up (networks: [app])."
+  else
+    note "  No direct way out: the same server, tried without the proxy, didn't answer (as it should)."
+  fi
+fi
 note ""
 note "Listening for the network in this container (inbound; Docker lets in only the ports you publish):"
 LISTEN="$(listening)"
@@ -143,9 +218,19 @@ if [ "${#EXTRA[@]}" -gt 0 ]; then
   note ""
 fi
 if [ "${#BAD[@]}" -eq 0 ]; then
-  if [ "${#EXTRA[@]}" -gt 0 ]; then exit 1; fi
+  if [ "${#EXTRA[@]}" -gt 0 ] || [ "$HOLE" = 1 ]; then exit 1; fi
   note "Result: every server Fishbowl uses answered."
   exit 0
+fi
+if [ -n "$PROXY" ]; then
+  note "Result: not reachable through the egress proxy: ${BAD[*]}."
+  note "  DENIED      the proxy refused it: not on its allowlist (images/egress/fishbowl-allowlist.txt)"
+  note "  REFUSED     the proxy tried, and the server or a firewall past the proxy refused"
+  note "  NO ANSWER   the proxy got no answer in time (or none from your upstream proxy)"
+  note "  NO DNS NAME the proxy couldn't look the name up"
+  note "  NO PROXY    this container can't reach the proxy itself (is fishbowl-egress running?)"
+  note "The proxy's log says what it did with each request: docker logs fishbowl-egress"
+  exit 1
 fi
 note "Result: not reachable from this container: ${BAD[*]}."
 note "There's no firewall inside the container, so something outside it blocks these: the"

@@ -19,6 +19,7 @@
     'server-failed':       ['bad', "Fishbowl Server didn't start", ''],
     'upgrading':           ['busy', 'Upgrading Fishbowl…', "Backing up every database, then Fishbowl's installer updates the program. Fishbowl Server starts again afterwards. Don't stop the container meanwhile."],
     'upgrade-interrupted': ['bad', "An upgrade didn't finish", ''],
+    'updating':            ['busy', 'Fishbowl is updating itself…', "Fishbowl downloaded an update (Auto Updates in Server Administration). The container backed up every database first; Fishbowl's updater is applying it now, and Fishbowl Server starts again by itself. Don't stop the container meanwhile."],
     'no-volumes':          ['bad', 'Nothing is running: the volumes are missing', ''],
     'foreign-data':        ['bad', "Nothing is running: these volumes weren't set up by this container", ''],
     'downgrade':           ['bad', 'Nothing is running: this image is older than your Fishbowl', ''],
@@ -129,7 +130,8 @@
     show($('pill-license'), !!s.install_type);
     setText($('pill-license'), s.install_type === 'trial' ? 'Trial' : 'Licensed');
 
-    show($('net-warning'), !LOCAL.includes(location.hostname));
+    // Over the network, only plain HTTP is a problem; the Compose stack's edge serves HTTPS.
+    show($('net-warning'), !LOCAL.includes(location.hostname) && location.protocol !== 'https:');
     show($('volumes-warning'), s.volumes === 'unnamed');
     const stale = typeof s.image_age_days === 'number' && s.image_age_days > s.image_max_age_days;
     show($('image-age-warning'), stale);

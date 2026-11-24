@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# fishbowl-volume-init: who owns what on the Compose stack's volumes.
+#
+# The stack's Fishbowl containers (fishbowl, page, desktop) never run as root,
+# so they can't fix ownership on their volumes themselves. This runs before
+# them, in its own short-lived container (compose.yaml, service volume-init): as
+# root, with only the CHOWN, FOWNER and DAC_OVERRIDE capabilities, no network,
+# a read-only image. It changes only what's wrong and exits, so after the first
+# run it finds nothing to do.
+#
+#   /opt/Fishbowl             fishbowl-app     Fishbowl's user (uid 1000)
+#   /var/lib/fishbowl         fishbowl-data    Fishbowl's user, except:
+#     page/                                    the page's user (uid 1001, in
+#                                              Fishbowl's group), owner only
+#     import/                                  Fishbowl's user and group, setgid,
+#                                              group-writable (the page puts
+#                                              uploads there)
+#   /var/lib/fishbowl-dbconf  fishbowl-dbconf  Fishbowl's user; db reads it
+#
+# Volumes from the single container (where the entrypoint runs as root) move
+# over as they are: this hands them to the stack's users, and the single
+# container takes them back by itself if you return to it. The page's access
+# code moves along too, so saved links keep working.
+#
+# Exit status: 0 = done; 1 = a volume is missing or something couldn't be changed.
+set -euo pipefail
+umask 022
+
+readonly FB_UID=1000 FB_GID=1000 PAGE_UID=1001
+readonly APP=/opt/Fishbowl DATA=/var/lib/fishbowl DBCONF=/var/lib/fishbowl-dbconf
+
+log()  { printf '%s [volume-init] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+fail() { printf '%s [volume-init] [error] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; exit 1; }
+
+[ "$(id -u)" = 0 ] || fail "This runs as root (compose.yaml, service volume-init, sets that); it's running as uid $(id -u)."
+for d in "$APP" "$DATA" "$DBCONF"; do
+  mountpoint -q "$d" || fail "$d isn't a volume. Run it the way compose.yaml does (docker compose up -d), with the volumes from README, \"The Compose stack\"."
+done
+
+# own UID:GID DIR [find options...]: hands everything under DIR (DIR included) to
+# UID:GID, without following links or leaving the volume; prints how many changed.
+own() {
+  local ug="$1" dir="$2" n; shift 2
+  n="$(find "$dir" -xdev "$@" \( ! -user "${ug%:*}" -o ! -group "${ug#*:}" \) -print -exec chown -h "$ug" {} + | wc -l)"
+  printf '%s' "$n"
+}
+
+changed=0
+
+# Fishbowl's installation.
+n="$(own "$FB_UID:$FB_GID" "$APP")"; changed=$((changed + n))
+[ "$n" = 0 ] || log "fishbowl-app: $n file(s) handed to Fishbowl's user"
+
+# Fishbowl's data folder. The page's folder is left out of the first pass.
+mkdir -p "$DATA"/{state,backups,logs,home/fishbowl,import,page,tmp}
+n="$(own "$FB_UID:$FB_GID" "$DATA" \( -path "$DATA/page" -prune -o -true \) ! -path "$DATA/page")"
+changed=$((changed + n))
+[ "$n" = 0 ] || log "fishbowl-data: $n file(s) handed to Fishbowl's user"
+chmod 0755 "$DATA" "$DATA/logs" "$DATA/home"
+chmod 0700 "$DATA/state" "$DATA/backups" "$DATA/home/fishbowl" "$DATA/tmp"
+chmod 2770 "$DATA/import"
+
+# The page's own folder: its access code. The single container kept the code in
+# state/; it comes along the first time.
+if [ ! -s "$DATA/page/web-code" ] && [ -f "$DATA/state/web-code" ] && [ ! -L "$DATA/state/web-code" ]; then
+  install -m 0600 -o "$PAGE_UID" -g "$FB_GID" "$DATA/state/web-code" "$DATA/page/web-code"
+  log "The page's access code came over from the single container: saved links keep working"
+fi
+n="$(own "$PAGE_UID:$FB_GID" "$DATA/page")"; changed=$((changed + n))
+chmod 0700 "$DATA/page"
+
+# Fishbowl's MySQL tuning, written by Fishbowl Server's container, read by db.
+n="$(own "$FB_UID:$FB_GID" "$DBCONF")"; changed=$((changed + n))
+chmod 0755 "$DBCONF"
+find "$DBCONF" -xdev -mindepth 1 -type f ! -perm 0644 -exec chmod 0644 {} +
+
+if [ "$changed" = 0 ]; then
+  log "Volume ownership is already right; nothing changed"
+else
+  log "Volume ownership set for the stack ($changed change(s))"
+fi
