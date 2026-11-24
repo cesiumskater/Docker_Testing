@@ -95,11 +95,15 @@ class Page:
         return self.api("GET", "/api/eula")
 
     # ---- the forms
-    def setup(self, key=None, company=None, accept=True, eula_sha256=None):
+    def setup(self, key=None, company=None, accept=True, eula_sha256=None, timezone=None):
+        """timezone: None leaves the container's own (the form's "keep"); a whole-hour GMT
+        offset such as -7 or "+5"; or "keep"."""
         body = {"eula_accepted": bool(accept), "eula_sha256": eula_sha256 or self.eula()["sha256"],
                 "license": "key" if key else "trial"}
         if key:
             body.update(key=key, company=company or "")
+        if timezone is not None:
+            body["timezone"] = timezone
         return self.api("POST", "/api/setup", body)
 
     def upgrade(self, password="", accept=True):

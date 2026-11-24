@@ -58,10 +58,11 @@ collect_answers() {
   hr
   note " Fishbowl Advanced $FISHBOWL_APP_VERSION - first-time setup"
   hr
-  note "Setup asks three things, then installs on its own:"
+  note "Setup asks four things, then installs on its own:"
   note "  1. Accept Fishbowl's license agreement"
   note "  2. Your Fishbowl license key, or the 14 Day Trial"
   note "  3. Your company name (licensed installs only; trials register as \"Trial\")"
+  note "  4. The time zone, as a GMT offset (for example GMT +5 or GMT -7)"
   note ""
   note "Set automatically: Server with Client install in /opt/Fishbowl, MySQL 8.4 on"
   note "localhost:3306, server memory ${SERVER_MEMORY_MB} MB, client memory ${CLIENT_MEMORY_MB} MB,"
@@ -129,7 +130,32 @@ collect_answers() {
     note ""
   fi
 
-  # 4. MySQL root password: none to choose. Every new installation uses the
+  # 4. Time zone ----------------------------------------------------------------
+  hr
+  note "Time zone"
+  note "This container is on $(tz_describe "${TZ:-UTC}"). Fishbowl dates orders,"
+  note "receipts and reports in its time zone. Type the GMT offset to use, for example"
+  note "+5 or -7, or press Enter to keep ${TZ:-UTC}. A GMT offset stays the same all"
+  note "year; it doesn't change for daylight saving time."
+  local tz="" n="" rc=0
+  while :; do
+    ask tz "GMT offset (Enter keeps ${TZ:-UTC}): " || { print_rerun_hint; exit 3; }
+    if [ -z "$(printf '%s' "$tz" | tr -d '[:space:]')" ]; then
+      SETUP_TZ="$(time_zone_kept)"
+      break
+    fi
+    rc=0; n="$(tz_parse_offset "$tz")" || rc=$?
+    case "$rc" in
+      0) SETUP_TZ="$(tz_offset_name "$n")"; break ;;
+      2) n="$(printf '%s' "$tz" | tr -d '[:space:]')"; note "Type it with its sign: +$n or -$n." ;;
+      3) note "That's outside GMT -12 to GMT +14. Type it again." ;;
+      *) note "Type a whole-hour GMT offset such as +5 or -7, or press Enter to keep ${TZ:-UTC}." ;;
+    esac
+  done
+  note "Time zone: $(tz_describe "$SETUP_TZ")."
+  note ""
+
+  # 5. MySQL root password: none to choose. Every new installation uses the
   # password in mysql-root-password.txt (see default_root_password).
   SETUP_PW="$(default_root_password)"
 
@@ -142,8 +168,15 @@ collect_answers() {
     note "  License:       key ending in ...${SETUP_KEY: -4}"
     note "  Company name:  $SETUP_COMPANY"
   fi
+  note "  Time zone:     $(tz_describe "$SETUP_TZ")"
   note "  MySQL root:    set by this image (not shown anywhere)"
   hr
+}
+
+# The container's own time zone (TZ from docker run -e TZ, or FB_TZ), when setup
+# keeps it; UTC when it has none, or none this image knows.
+time_zone_kept() {
+  if time_zone_valid "${TZ:-}"; then printf '%s\n' "$TZ"; else printf 'UTC\n'; fi
 }
 
 # ------------------------------------------------------------ answers file --
@@ -158,6 +191,7 @@ collect_answers() {
 #   eula_sha256=<SHA-256 of the license text that was shown>
 #   license=trial | key            (setup)
 #   key=...  company=...           (setup with a key)
+#   timezone=keep | Etc/GMT[+-]N   (setup; keep, or absent: the container's own TZ)
 #   password=<MySQL root password> (upgrade only, and only when the installation has one of
 #                                  its own; empty or absent means the image's password)
 write_answers() {  # write_answers FILE setup|upgrade   (from SETUP_* / UPG_PW; terminal commands only)
@@ -178,6 +212,7 @@ write_answers() {  # write_answers FILE setup|upgrade   (from SETUP_* / UPG_PW; 
           printf 'key=%s\n' "$SETUP_KEY"
           printf 'company=%s\n' "$SETUP_COMPANY"
         fi
+        printf 'timezone=%s\n' "${SETUP_TZ:-keep}"
       else
         printf 'password=%s\n' "${UPG_PW:-}"
       fi
@@ -190,7 +225,7 @@ write_answers() {  # write_answers FILE setup|upgrade   (from SETUP_* / UPG_PW; 
 # removed as soon as it has been read, unless the third argument is "keep".
 read_answers() {  # read_answers FILE setup|upgrade [keep]
   local file="$1" kind="$2" keep="${3:-}" line k v first=1 header="" problem
-  local a_kind="" a_via="" a_eula="" a_sha="" a_license="" a_key="" a_company="" a_pw=""
+  local a_kind="" a_via="" a_eula="" a_sha="" a_license="" a_key="" a_company="" a_pw="" a_tz=""
   { [ -f "$file" ] && [ ! -L "$file" ]; } || fail 1 "The answers are missing; nothing was changed. Please try again."
   while IFS= read -r line || [ -n "$line" ]; do
     if [ "$first" = 1 ]; then
@@ -208,6 +243,7 @@ read_answers() {  # read_answers FILE setup|upgrade [keep]
       key) a_key="$v" ;;
       company) a_company="$v" ;;
       password) a_pw="$v" ;;
+      timezone) a_tz="$v" ;;
     esac
   done < "$file"
   [ "$keep" = keep ] || rm -f -- "$file"
@@ -243,6 +279,14 @@ read_answers() {  # read_answers FILE setup|upgrade [keep]
       [ -z "$problem" ] || fail 1 "$problem Nothing was installed."
       SETUP_TRIAL=0; SETUP_KEY="$a_key"; SETUP_COMPANY="$a_company" ;;
     *) fail 1 "Choose a license key or the trial. Nothing was installed." ;;
+  esac
+  # The time zone: keep the container's own, or a whole-hour GMT offset.
+  case "$a_tz" in
+    ""|keep) SETUP_TZ="$(time_zone_kept)" ;;
+    *)
+      [[ "$a_tz" =~ ^Etc/GMT([+-]([1-9]|1[0-4]))?$ ]] && time_zone_valid "$a_tz" ||
+        fail 1 "The time zone '$a_tz' isn't one setup offers (GMT -12 to GMT +14). Nothing was installed."
+      SETUP_TZ="$a_tz" ;;
   esac
   SETUP_PW="$(default_root_password)"; a_pw=""; a_key=""
 }
@@ -336,6 +380,11 @@ perform_install() {
   set_status setup
   write_state setup.in-progress "$(_ts) $FISHBOWL_VERSION"
 
+  # The time zone first: MySQL (here, or its time_zone in the database container)
+  # and Fishbowl's installer start with it.
+  export TZ="$SETUP_TZ"
+  log "Time zone: $(tz_describe "$TZ"), as chosen at setup"
+
   SETUP_SECRETS="$(secret_dir)"
   if db_external; then
     # The database container made its own data directory (root's password from
@@ -391,6 +440,7 @@ perform_install() {
   write_state installed-app-version "$FISHBOWL_APP_VERSION"
   write_state install-type "$([ "$SETUP_TRIAL" = 1 ] && echo trial || echo licensed)"
   write_state mysql-root-password image   # the image's password (no secret in this file)
+  write_state timezone "$SETUP_TZ"        # applied at every start (apply_time_zone)
   write_state setup.complete "$(_ts) Fishbowl $FISHBOWL_VERSION"
   rm -f "$STATE_DIR/setup.in-progress"
   setup_cleanup

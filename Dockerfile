@@ -100,10 +100,15 @@ COPY --from=mysql-tools /usr/bin/mysql /usr/bin/mysqldump /usr/bin/mysqladmin /u
 # published so far and fails the build if a repository can't be read or the
 # runtime check (verify-runtime.sh server) fails (decision 4).
 ARG PACKAGES_REFRESH=
+# UBI minimal lists tzdata as installed but ships without its zone files, so TZ
+# and the time zone chosen at setup would quietly be UTC: reinstalling brings
+# /usr/share/zoneinfo back, and the build stops if it doesn't.
 RUN microdnf -y --setopt=install_weak_deps=0 --nodocs install \
         temurin-21-jre fontconfig dejavu-sans-fonts \
         python3 procps-ng util-linux findutils diffutils tar gzip which hostname tzdata \
         ncurses-libs zlib openssl-libs \
+ && microdnf -y --nodocs reinstall tzdata \
+ && test -f /usr/share/zoneinfo/America/Denver && test -f /usr/share/zoneinfo/Etc/GMT+7 \
  && bash /usr/local/bin/update-all.sh --build \
  && mkdir -p /usr/local/share/fishbowl \
  && date -u +%Y-%m-%dT%H:%M:%SZ > /usr/local/share/fishbowl/image-built \
@@ -148,6 +153,8 @@ LABEL org.opencontainers.image.title="Fishbowl Advanced: Fishbowl Server (Compos
 USER 1000:1000
 # 2456: Fishbowl Clients. 28192: Fishbowl's API (integrated apps). Only the edge
 # containers publish ports; these are reached on the stack's own network.
+# FISHBOWL_PORT and FISHBOWL_LEGACY_PORT (compose.yaml sets them from .env) move
+# both to another pair.
 EXPOSE 2456 28192
 STOPSIGNAL SIGTERM
 # Healthy once Fishbowl Server answers an HTTP request on its client port and
@@ -167,8 +174,12 @@ COPY rootfs/usr/local/lib/fishbowl/verify-runtime.sh /usr/local/lib/fishbowl/ver
 COPY rootfs/usr/local/bin/update-all.sh /usr/local/bin/update-all.sh
 COPY --from=novnc /usr/share/novnc/ /usr/share/novnc/
 ARG PACKAGES_REFRESH=
+# tzdata reinstalled for its zone files, as in the server image: the page shows
+# the container's time zone in the setup form.
 RUN microdnf -y --setopt=install_weak_deps=0 --nodocs install \
         python3 procps-ng util-linux findutils tzdata \
+ && microdnf -y --nodocs reinstall tzdata \
+ && test -f /usr/share/zoneinfo/America/Denver && test -f /usr/share/zoneinfo/Etc/GMT+7 \
  && bash /usr/local/bin/update-all.sh --build \
  && mkdir -p /usr/local/share/fishbowl \
  && date -u +%Y-%m-%dT%H:%M:%SZ > /usr/local/share/fishbowl/image-built \
@@ -379,6 +390,9 @@ VOLUME ["/var/lib/mysql", "/opt/Fishbowl", "/var/lib/fishbowl"]
 
 # 2456: Fishbowl Clients. 28192: Fishbowl's API ("Legacy Port"), for integrated
 # apps and integrations. 6080: the Fishbowl page (publish it on 127.0.0.1 only).
+# A second Fishbowl on the same computer uses another pair: publish only that pair
+# and name it in FISHBOWL_PORT and FISHBOWL_LEGACY_PORT (README, "Two Fishbowl
+# Servers on one computer").
 EXPOSE 2456 28192 6080
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10m --retries=3 \

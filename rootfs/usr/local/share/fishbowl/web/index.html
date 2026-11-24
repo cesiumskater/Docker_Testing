@@ -74,7 +74,7 @@
   <!-- first-time setup -->
   <section class="card" id="setup-card" hidden>
     <h2>First-time setup</h2>
-    <p>Two things, then Fishbowl installs on its own (a minute or two): the license agreement and your license. Nothing is accepted or installed until you press the button at the bottom.</p>
+    <p>Three things, then Fishbowl installs on its own (a minute or two): the license agreement, your license and the time zone. Nothing is accepted or installed until you press the button at the bottom.</p>
     <form id="setup-form" autocomplete="off">
       <fieldset>
         <legend>1. Fishbowl's license agreement</legend>
@@ -101,7 +101,15 @@
       </fieldset>
 
       <fieldset>
-        <legend>3. MySQL root password</legend>
+        <legend>3. Time zone</legend>
+        <p class="hint" id="setup-tz-now">Fishbowl dates orders, receipts and reports in its time zone.</p>
+        <label for="setup-tz">Time zone (GMT offset)</label>
+        <select id="setup-tz"></select>
+        <p class="hint">A GMT offset stays the same all year: it doesn't change for daylight saving time.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend>4. MySQL root password</legend>
         <p class="hint">Nothing to choose. This image sets MySQL's root password itself, and it is never shown. When you create or restore a database, Fishbowl fills the Password field in for you.</p>
       </fieldset>
 

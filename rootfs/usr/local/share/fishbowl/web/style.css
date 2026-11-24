@@ -94,7 +94,7 @@ button.link { border: 0; background: none; color: var(--accent); padding: 0; tex
 label { display: block; font-weight: 600; margin: .8rem 0 .25rem; }
 label.check, label.radio { font-weight: 400; display: flex; gap: .55rem; align-items: flex-start; margin: .45rem 0; }
 label.check input, label.radio input { margin-top: .3rem; flex: none; }
-input[type=text], input[type=password] {
+input[type=text], input[type=password], select {
   font: inherit; width: 100%; max-width: 30rem; padding: .5rem .6rem; border-radius: 8px;
   border: 1px solid var(--line); background: var(--card); color: var(--text);
 }

@@ -267,6 +267,18 @@ def image_age_days(built):
     return max(0, int((time.time() - when) // 86400))
 
 
+def time_zone_now():
+    """The container's own time zone (its TZ), which setup offers to keep: its name,
+    its offset from GMT now in minutes, and whether that offset changes during the
+    year (daylight saving time)."""
+    name = os.environ.get("TZ", "") or "UTC"
+    now = time.localtime()
+    year = now.tm_year
+    jan = time.localtime(time.mktime((year, 1, 15, 12, 0, 0, 0, 0, -1))).tm_gmtoff
+    jul = time.localtime(time.mktime((year, 7, 15, 12, 0, 0, 0, 0, -1))).tm_gmtoff
+    return {"name": name, "offset_minutes": now.tm_gmtoff // 60, "daylight_saving": jan != jul}
+
+
 def build_status():
     info = read_kv(RUN + "/info")
     return {
@@ -293,6 +305,7 @@ def build_status():
         # answers handed over that the container has not picked up yet
         "requests": {name: os.path.exists(os.path.join(SPOOL, name)) for name in ("setup", "upgrade")},
         "pending_settings": os.path.exists(RUN + "/pending-settings"),
+        "time_zone": time_zone_now(),
         "pending_database": first_line(RUN + "/pending-settings"),
         "sessions": {name: session_state(name) for name in SESSIONS},
         "imports": list_imports(),
@@ -348,6 +361,19 @@ def setup_request(data):
         lines += ["license=key", "key=" + key, "company=" + company]
     else:
         raise Problem(400, "Choose a license key or the 14 Day Trial.")
+    # The time zone: "keep" (the container's own) or a whole-hour GMT offset, which
+    # becomes an Etc/GMT zone (whose sign is the other way round: GMT -7 is Etc/GMT+7).
+    tz = data.get("timezone", "keep")
+    if tz == "keep":
+        lines.append("timezone=keep")
+    else:
+        try:
+            hours = int(str(tz).strip())
+        except ValueError:
+            raise Problem(400, "Choose the time zone from the list.") from None
+        if not -12 <= hours <= 14:
+            raise Problem(400, "Choose a time zone from GMT -12 to GMT +14.")
+        lines.append("timezone=" + ("Etc/GMT" if hours == 0 else "Etc/GMT%+d" % -hours))
     return lines
 
 

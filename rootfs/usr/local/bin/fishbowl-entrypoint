@@ -345,7 +345,7 @@ unnamed_volumes_text() {
   note "Nothing set up yet? Start over with named volumes:"
   note "  docker rm -f ${HOSTNAME:-<this container>}"
   note "  docker run -d --name fishbowl --restart always --stop-timeout 180 \\"
-  note "    -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \\"
+  note "    $(run_ports_text) -p 127.0.0.1:6080:6080 \\"
   note "    -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl \\"
   note "    -v fishbowl-data:/var/lib/fishbowl ${FISHBOWL_IMAGE:-fishbowl}"
   note ""
@@ -621,6 +621,9 @@ fishbowl_start() {
   FB_PID=$!
   cd /
   port="$(client_port)"
+  # The port it serves from now on, for the health check and the Client window
+  # (a Port changed in Server Administration takes effect at the next start).
+  printf '%s\n' "$port" > "$SERVER_PORT_FILE.tmp" && mv -f "$SERVER_PORT_FILE.tmp" "$SERVER_PORT_FILE"
   # No time limit while the server is alive: after an upgrade (or with an older
   # database restored) it updates the database before it listens, and stopping
   # it half-way could damage the database.
@@ -1087,6 +1090,7 @@ cmd_desktop() {
         open-*)
           geom="$(head -c 32 "$f" 2>/dev/null | tr -dc '0-9x' || true)"
           rm -f "$f"
+          apply_time_zone   # setup may have chosen it since this container started
           session_open "${name#open-}" "$geom" ;;
         close-*)
           rm -f "$f"
@@ -1140,6 +1144,7 @@ run_services() {
       start)
         apply_pending_settings
         sync_server_memory
+        sync_server_ports
         publish_info
         if ! database_configured; then await_database; fi
         if [ "$NEXT" = start ]; then
@@ -1233,6 +1238,7 @@ cmd_run() {
   esac
   check_version
   publish_info
+  apply_time_zone --log   # the one chosen at setup, for MySQL and Fishbowl from here on
   run_services
 }
 
@@ -1253,6 +1259,7 @@ cmd_restore() {
   ask answer 'Type "restore" to continue: ' || exit 3
   [ "$answer" = restore ] || { note "Cancelled; nothing changed."; exit 1; }
   apply_fishbowl_mycnf   # Fishbowl's max_allowed_packet, for large rows in the dump
+  apply_time_zone
   mysql_start
   local rc=0
   ask_root_password_until_valid || rc=$?

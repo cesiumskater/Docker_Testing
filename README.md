@@ -46,6 +46,7 @@ docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater
 docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
 docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
   -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \
+  -e FISHBOWL_PORT=2456 -e FISHBOWL_LEGACY_PORT=28192 \
   -e TZ=America/Denver \
   -v fishbowl-mysql:/var/lib/mysql \
   -v fishbowl-app:/opt/Fishbowl \
@@ -63,7 +64,7 @@ docker exec fishbowl fishbowl-link
 ```powershell
 docker build --platform linux/amd64 -t fishbowl "https://github.com/cesiumskater/Docker_Testing.git#main"
 docker tag fishbowl "fishbowl:$(docker run --rm --platform linux/amd64 fishbowl version)"
-docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096 fishbowl
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e FISHBOWL_PORT=2456 -e FISHBOWL_LEGACY_PORT=28192 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096 fishbowl
 docker exec fishbowl fishbowl-link
 ```
 
@@ -75,12 +76,16 @@ Open the link in a browser on the same computer. The page walks you through
 the rest: setup (about half a minute), then your company database (restore a
 `.sql` backup or create a new one), after which Fishbowl Server starts by
 itself. Fishbowl Clients connect to this computer's name or IP address on
-**port 2456**.
+**port 2456**. Another Fishbowl Server on the same computer (a sandbox, or one
+installed outside Docker) needs a pair of ports of its own:
+[Two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer).
 
-`TZ` is your time zone as a name from the
-[tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones),
-such as `America/Denver` or `Europe/London`. That holds on Windows too: a
-Windows name like *Mountain Standard Time* doesn't work here.
+Setup asks for the time zone ([The time zone](#the-time-zone)). It offers to keep
+`TZ`, a name from the
+[tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones)
+such as `America/Denver` or `Europe/London`, which follows daylight saving time,
+or to use a GMT offset such as GMT -7, which stays the same all year. A Windows
+name like *Mountain Standard Time* doesn't work for `TZ`.
 
 ### With Docker Compose instead of `docker run`
 
@@ -97,9 +102,9 @@ volumes, so run one or the other; a site moves between them with its data.
 1. [What this is, and the support position](#1-what-this-is-and-the-support-position)
 2. [Requirements](#2-requirements)
 3. [Get the image](#3-get-the-image)
-4. [Start it, and starting automatically](#4-start-it-and-starting-automatically)
+4. [Start it, and starting automatically](#4-start-it-and-starting-automatically), and [two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer)
 5. [The Fishbowl page](#5-the-fishbowl-page)
-6. [First-time setup](#6-first-time-setup)
+6. [First-time setup](#6-first-time-setup), and [the time zone](#the-time-zone)
 7. [Your company database: restore a .sql backup or create a new one](#7-your-company-database-restore-a-sql-backup-or-create-a-new-one)
 8. [Server Administration in its browser window](#8-server-administration-in-its-browser-window)
 9. [The Fishbowl Client in its browser window](#9-the-fishbowl-client-in-its-browser-window)
@@ -167,7 +172,7 @@ MySQL 9.x and MariaDB, and its installer accepts only Java 21).
 | Browser | A current browser on the computer that runs Docker, for the Fishbowl page. Tested with headless Chromium. |
 | Disk | About **3.7 GB** for the image, about **1.2 GB** for a fresh install's volumes plus your databases and backups, and about **1.5 GB** of temporary space during install and upgrades. Plan on **10 GB free**. |
 | RAM | Plan on **12 GB available to Docker** for Fishbowl Server and MySQL, plus about **2 GB** while the browser windows are open. Details below. |
-| Ports | **2456** reachable by Fishbowl Clients. **6080** on 127.0.0.1 for the Fishbowl page. Both must be free on the computer ([a port is already in use](#a-port-is-already-in-use)). |
+| Ports | **2456** reachable by Fishbowl Clients, **28192** for integrated apps, and **6080** on 127.0.0.1 for the Fishbowl page. They must be free on the computer ([a port is already in use](#a-port-is-already-in-use)). Another Fishbowl Server on the same computer takes a pair of its own ([Two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer)). |
 
 **Why 12 GB.** This is an estimate from the configured limits, not a
 measurement under load. Fishbowl Server is set to an **8192 MB** Java heap (as
@@ -272,6 +277,7 @@ docker tag ghcr.io/cesiumskater/docker_testing:latest fishbowl
 ```bash
 docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
   -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \
+  -e FISHBOWL_PORT=2456 -e FISHBOWL_LEGACY_PORT=28192 \
   -e TZ=America/Denver \
   -v fishbowl-mysql:/var/lib/mysql \
   -v fishbowl-app:/opt/Fishbowl \
@@ -286,7 +292,7 @@ docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-tim
 **Windows (PowerShell)**
 
 ```powershell
-docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096 fishbowl
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e FISHBOWL_PORT=2456 -e FISHBOWL_LEGACY_PORT=28192 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096 fishbowl
 ```
 
 For the Compose stack instead (several containers, HTTPS, nightly backups), see
@@ -300,13 +306,89 @@ For the Compose stack instead (several containers, HTTPS, nightly backups), see
 | `--stop-timeout 180` | Gives Fishbowl Server and MySQL up to 3 minutes to shut down cleanly. |
 | `-p 2456:2456` | Fishbowl Clients connect here. |
 | `-p 28192:28192` | Fishbowl's API ("Legacy Port"): integrated apps and integrations on other computers connect here. |
+| `-e FISHBOWL_PORT=2456 -e FISHBOWL_LEGACY_PORT=28192` | The same two numbers: the container writes them into Server Administration's **Port** and **Legacy Port** before every start, so Fishbowl Server uses exactly the ports Docker publishes. Change all four numbers together ([Two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer)). |
 | `-p 127.0.0.1:6080:6080` | The Fishbowl page, reachable from this computer only. See [Security](#14-security) before changing it. |
-| `-e TZ=…` | Your time zone, as a tz database name (Fishbowl and MySQL use it for dates). Defaults to UTC. |
+| `-e TZ=…` | The time zone setup offers to keep, as a tz database name. Setup asks ([The time zone](#the-time-zone)); without `TZ` it offers UTC. |
 | the three `-v` | Your installation and data. They outlive the container: remove and recreate it any time. |
 | `--read-only` and the three `--tmpfs` | The image can't change while it runs; updates come from rebuilds ([section 12](#updates-to-the-system-inside-the-container-mysql-java-and-the-rest)). `/run`, `/tmp` and `/var/tmp` live in memory and start empty; everything that lasts is on the volumes. `/tmp` keeps the usual permission to run programs from it, as Java tools often expect (not tested without it). |
 | `--cap-drop ALL` and the six `--cap-add` | Keeps only what start-up needs to hand MySQL, Fishbowl and the page their own users and files. |
 | `--security-opt no-new-privileges:true` | No process in the container can gain privileges it didn't start with. |
 | `--pids-limit 4096` | Caps processes and threads, so a runaway can't exhaust the computer. |
+
+### Two Fishbowl Servers on one computer
+
+Docker holds every port a container publishes on this computer while the
+container runs, whether anything listens behind it or not. A container
+that publishes 2456 keeps a Fishbowl Server installed on the computer from
+starting there (it reports **Server is already running**), even when the
+container's own Fishbowl uses another port. So each Fishbowl on one computer
+gets its own pair, and each container publishes only its own:
+
+| | Port (Clients) | Legacy Port (integrated apps) |
+|---|---|---|
+| The first Fishbowl (in Docker, or installed on the computer) | 2456 | 28192 |
+| A second one, such as a sandbox | 2457 | 28193 |
+
+`FISHBOWL_PORT` and `FISHBOWL_LEGACY_PORT` name a container's pair. Before every
+start the container writes them into Server Administration's **Port** and
+**Legacy Port**, so that window always shows the ports that really run. A
+different number typed there is put back at the next start, and the log says how
+to move the container instead.
+
+A sandbox container next to another Fishbowl takes the second pair and its own
+name, volumes and page port:
+
+**Linux and macOS**
+
+```bash
+docker run -d --platform linux/amd64 --name fishbowl-sandbox --restart always --stop-timeout 180 \
+  -p 2457:2457 -p 28193:28193 -p 127.0.0.1:6081:6080 \
+  -e FISHBOWL_PORT=2457 -e FISHBOWL_LEGACY_PORT=28193 \
+  -e TZ=America/Denver \
+  -v fishbowl-sandbox-mysql:/var/lib/mysql \
+  -v fishbowl-sandbox-app:/opt/Fishbowl \
+  -v fishbowl-sandbox-data:/var/lib/fishbowl \
+  --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" \
+  --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
+  --cap-add KILL --cap-add SETGID --cap-add SETUID \
+  --security-opt no-new-privileges:true --pids-limit 4096 \
+  fishbowl
+docker exec fishbowl-sandbox fishbowl-link
+```
+
+**Windows (PowerShell)**
+
+```powershell
+docker run -d --platform linux/amd64 --name fishbowl-sandbox --restart always --stop-timeout 180 -p 2457:2457 -p 28193:28193 -p 127.0.0.1:6081:6080 -e FISHBOWL_PORT=2457 -e FISHBOWL_LEGACY_PORT=28193 -e TZ=America/Denver -v fishbowl-sandbox-mysql:/var/lib/mysql -v fishbowl-sandbox-app:/opt/Fishbowl -v fishbowl-sandbox-data:/var/lib/fishbowl --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096 fishbowl
+docker exec fishbowl-sandbox fishbowl-link
+```
+
+Its page is on port 6081 (change 6080 to 6081 in the link `fishbowl-link`
+prints). Fishbowl Clients reach it on port 2457: type 2457 as the port next to
+the server's address in the Client's login. Integrated apps use 28193. The
+firewall commands under [the Fishbowl Client](#9-the-fishbowl-client-in-its-browser-window)
+take the second pair too.
+
+**Moving a container to the other pair.** Docker fixes a container's ports when
+it's created, so stop it, remove it and start it again with the new numbers. The
+volumes keep everything; setup isn't asked again:
+
+```bash
+docker stop fishbowl
+docker rm fishbowl
+```
+
+then its `docker run` with the same name and volumes and the four numbers
+changed (`-p 2457:2457 -p 28193:28193 -e FISHBOWL_PORT=2457 -e
+FISHBOWL_LEGACY_PORT=28193`). If Server Administration had another number, the
+log says so (`Server Administration's Port was 2456; set to 2457, …`). The same
+works in PowerShell.
+
+**In the Compose stack**, `FB_CLIENT_PORT` and `FB_API_PORT` in `.env` are the
+pair: the edge publishes only them, the same numbers inside, and the server
+container sets Server Administration's ports to them. The stack's container and
+volume names are fixed, so it's one per computer; a sandbox next to it runs as a
+single container like the one above.
 
 **Starting automatically.** `--restart always` (Compose: `restart: always`)
 starts the container whenever Docker starts. Per Docker's documentation, a
@@ -401,7 +483,10 @@ form. Nothing is accepted or installed until you submit it.
 2. **Your Fishbowl license.** Your license key and the company name exactly as
    it appears on your license, or **Start the 14 Day Fishbowl Trial** (Fishbowl
    registers a trial under the name "Trial").
-3. **Nothing else.** There's no MySQL password to choose: the image sets one
+3. **The time zone.** Fishbowl dates orders, receipts and reports in it. Pick a
+   GMT offset, from GMT -12 to GMT +14 (such as GMT -7 or GMT +5), or keep the
+   container's own `TZ` ([The time zone](#the-time-zone) below).
+4. **Nothing else.** There's no MySQL password to choose: the image sets one
    itself (see [The MySQL root password](#the-mysql-root-password) below). It's
    never shown: Server Administration's Password fields come filled in with it.
 
@@ -419,9 +504,10 @@ tuning from its `server/bin/my.cnf`, and Fishbowl's Auto Updates set to *Never*
 (new versions come from new images, see [section 12](#12-updating-to-a-new-fishbowl-version)).
 
 **Prefer a terminal?** `docker exec -it fishbowl fishbowl-setup` asks the same
-three things (the agreement opens in a pager and only a typed `yes` accepts it),
-then hands the answers to the container the same way the page does. It works the
-same in PowerShell.
+questions (the agreement opens in a pager and only a typed `yes` accepts it; the
+time zone is typed as `+5` or `-7`, and Enter keeps `TZ`), then hands the
+answers to the container the same way the page does. It works the same in
+PowerShell.
 
 **"This container has no named volumes."** A container started without the
 three `-v` options (for example from Docker Desktop's Run button) gets unnamed
@@ -432,6 +518,37 @@ warns about this and asks for an extra tick before installing; the log prints
 the commands to start over with named volumes, or to reuse the unnamed ones.
 The log writes them the Linux and macOS way, with `\` line breaks: in
 PowerShell, put each command on one line and leave the `\` out.
+
+### The time zone
+
+The time zone chosen at setup is the one Fishbowl Server, MySQL and the browser
+windows use, from the install on and at every start after it. At each start the
+log says which (`Time zone: GMT -7 (chosen at setup)`). The container's own log
+lines stay in UTC.
+
+- **A GMT offset** (GMT -7, GMT +5) stays the same all year: it doesn't move for
+  daylight saving time. Inside the container it's a zone from the tz database
+  with the sign turned around, which is how that database names them: GMT -7 is
+  `Etc/GMT+7`, and GMT +5 is `Etc/GMT-5`.
+- **Keep** uses the container's own `TZ` (`-e TZ=…`, or `FB_TZ` in the Compose
+  stack): a named zone such as `America/Denver`, which does follow daylight
+  saving time. Without `TZ` that's UTC.
+
+The choice is kept in the data volume, in `/var/lib/fishbowl/state/timezone`, so
+a new container on the same volumes keeps it, whatever its own `TZ`. To change
+it later, write the new zone there and restart. For GMT -7:
+
+```bash
+docker exec fishbowl sh -c "echo Etc/GMT+7 > /var/lib/fishbowl/state/timezone"
+docker restart fishbowl
+```
+
+The same two lines work in PowerShell. To follow daylight saving time again,
+write a zone name instead, such as `America/Denver`. In the Compose stack the
+first line is the same, and the second is `docker compose restart fishbowl`
+(it sets MySQL's time zone too); close and reopen any Fishbowl window that's
+open. An installation set up before setup asked this question has no such file
+and goes on using `TZ`.
 
 ## 7. Your company database: restore a .sql backup or create a new one
 
@@ -619,9 +736,9 @@ to Fishbowl**. Of those, only Backup Database was tried here
 
 | Setting | Notes for this container |
 |---|---|
-| Port (2456) | The port Fishbowl Clients use. If you change it, publish the new port instead (`-p NEW:NEW`, or the `ports:` line in `compose.yaml`) and recreate the container. |
+| Port (2456) | The port Fishbowl Clients use. The container sets it from `FISHBOWL_PORT` before every start (`FB_CLIENT_PORT` in the Compose stack), so it always matches the published port; a number typed here is put back at the next start, and the log says so. To change it, recreate the container with the new number ([Two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer)). |
 | Secure Connection, Certificate, Certificate Password | Fishbowl uses a `.jks` certificate file for this. The file must be inside the container: copy it to the import folder like a `.sql` file. Not tested here. |
-| Legacy Port (28192) | Not published. Publish it (`-p 28192:28192`) only if something you use still connects to it. |
+| Legacy Port (28192) | Fishbowl's API for integrated apps, published with `-p 28192:28192`. Set from `FISHBOWL_LEGACY_PORT` (`FB_API_PORT` in the stack) the same way. |
 | Inactivity Time | Fishbowl's inactivity timeout, in minutes. |
 | Broadcast Server Location, Users can only be logged in once | Fishbowl's own options. |
 | Server memory | Set to 8192 MB at install. A new value takes effect at the next restart; the log shows `Server memory changed in Server Administration: now …` and the heap in `Fishbowl Server is running (heap …)`. Keep Docker's memory limit above it ([section 2](#how-much-memory-docker-gets)). |
@@ -646,7 +763,8 @@ follows it when you resize the tab.
 - It's one Client: everyone who opens it shares the same window, and it uses
   about 1.5 GB of memory while open. It suits the person who looks after the
   server (a quick check, the first-time wizard on a new database). Everyone else
-  installs the Fishbowl Client on their own computer and connects to port 2456.
+  installs the Fishbowl Client on their own computer and connects to port 2456
+  (or the container's own port, such as 2457 for a sandbox).
 - When the Client exits, the tab says so and offers to open it again. **Force
   close** ends it without asking Fishbowl.
 - The clipboard box in **Steps and clipboard** works as in Server
@@ -655,21 +773,26 @@ follows it when you resize the tab.
   Fishbowl's login dialog.
 
 **Fishbowl Clients on other computers** connect to the Docker host's **name or
-IP address, port 2456** (or the computer's port you published instead, see
-[a port is already in use](#a-port-is-already-in-use)). The client that comes
-with 26.10 and 26.11 defaults to the server's web port (`ServerPort=2456`,
-`UseWebConnection=true` in its `client.properties`).
+IP address, port 2456**, or the container's own `FISHBOWL_PORT` (2457 for a
+sandbox next to another Fishbowl, see
+[Two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer)).
+The client that comes with 26.10 and 26.11 defaults to the server's web port
+(`ServerPort=2456`, `UseWebConnection=true` in its `client.properties`); type
+the other number in its login for a server on another port.
 
 The host's firewall has to let TCP 2456 in, and 28192 for integrated apps and
-integrations on other computers. What Fishbowl itself needs to reach on the
-internet is in [Network and firewall](#network-and-firewall-licenses-plugins-integrations).
+integrations on other computers; for a second Fishbowl, its pair too (2457 and
+28193). What Fishbowl itself needs to reach on the internet is in
+[Network and firewall](#network-and-firewall-licenses-plugins-integrations).
 None of the following was tried here:
 
 - **Windows:** if other computers can't connect, add a rule in PowerShell
-  opened with **Run as administrator**:
+  opened with **Run as administrator** (the second line only for a sandbox on
+  2457 and 28193):
 
   ```powershell
   New-NetFirewallRule -DisplayName "Fishbowl Server (Docker)" -Direction Inbound -Protocol TCP -LocalPort 2456,28192 -Action Allow
+  New-NetFirewallRule -DisplayName "Fishbowl sandbox (Docker)" -Direction Inbound -Protocol TCP -LocalPort 2457,28193 -Action Allow
   ```
 
 - **macOS:** with the firewall on (**System Settings → Network → Firewall**),
@@ -682,6 +805,8 @@ None of the following was tried here:
   sudo firewall-cmd --permanent --add-port=2456/tcp --add-port=28192/tcp
   sudo firewall-cmd --reload
   ```
+
+  For a sandbox on the second pair, the same with `2457/tcp` and `28193/tcp`.
 
 ### Picture quality, and what it costs
 
@@ -970,6 +1095,7 @@ picks them up. Use the same `-p` and `TZ` values you started it with.
 docker rm fishbowl
 docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 \
   -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \
+  -e FISHBOWL_PORT=2456 -e FISHBOWL_LEGACY_PORT=28192 \
   -e TZ=America/Denver \
   -v fishbowl-mysql:/var/lib/mysql \
   -v fishbowl-app:/opt/Fishbowl \
@@ -985,7 +1111,7 @@ docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-tim
 
 ```powershell
 docker rm fishbowl
-docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096 fishbowl
+docker run -d --platform linux/amd64 --name fishbowl --restart always --stop-timeout 180 -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 -e FISHBOWL_PORT=2456 -e FISHBOWL_LEGACY_PORT=28192 -e TZ=America/Denver -v fishbowl-mysql:/var/lib/mysql -v fishbowl-app:/opt/Fishbowl -v fishbowl-data:/var/lib/fishbowl --read-only --tmpfs "/run:mode=0755" --tmpfs "/tmp:exec,mode=1777" --tmpfs "/var/tmp:mode=1777" --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add KILL --cap-add SETGID --cap-add SETUID --security-opt no-new-privileges:true --pids-limit 4096 fishbowl
 ```
 
 **With Compose**, in the folder with `compose.yaml`, on every system:
@@ -1196,7 +1322,7 @@ set of volumes is used by one or the other.
 | `fishbowl-db` | MySQL 8.4 (the official `mysql:8.4` image) | uid 27 | data |
 | `fishbowl-backup` | A verified dump of every database, every night | uid 1000 | data |
 | `fishbowl-edge` | HTTPS for the page (443), the page on this computer (127.0.0.1:6080), TLS for Clients if you want it | uid 1002 | public, app |
-| `fishbowl-edge-tcp` | Ports 2456 (Fishbowl Clients) and 28192 (integrated apps) | `haproxy` | public, app |
+| `fishbowl-edge-tcp` | Fishbowl Server's two ports: `FB_CLIENT_PORT` (2456, Fishbowl Clients) and `FB_API_PORT` (28192, integrated apps) | `haproxy` | public, app |
 | `fishbowl-egress` | The only way out: Fishbowl's own servers, by name | `squid` | app, outbound |
 | `fishbowl-volume-init` | Runs first, hands the volumes to the users above, exits | root with three capabilities, no network | none |
 
@@ -1213,8 +1339,12 @@ container is.
 ### Set it up
 
 Edit `.env` before the first `docker compose up -d`: at least `FB_TZ` (your time
-zone) and `FB_PUBLIC_HOST` (the name or IP address people type to reach this
-computer; the HTTPS certificate is made for it). The first start builds the
+zone, the one setup offers to keep) and `FB_PUBLIC_HOST` (the name or IP address
+people type to reach this computer; the HTTPS certificate is made for it). If
+another Fishbowl Server on this computer already has 2456 and 28192, set
+`FB_CLIENT_PORT` and `FB_API_PORT` to another pair, such as 2457 and 28193
+([Two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer)).
+The first start builds the
 images from GitHub, which takes a while (the Fishbowl installer alone is about
 750 MB). Tested on Docker Engine on Linux; not yet on Docker Desktop.
 
@@ -1286,7 +1416,9 @@ after the other.)
 
 `volume-init` hands the files to the stack's users, the page keeps its access
 code (saved links keep working), the database container adds root's account for
-its network, and Fishbowl Server starts against it with no questions. Going back
+its network, and Fishbowl Server starts against it with no questions. A single
+container that ran on another pair (2457 and 28193, say) keeps it only if that
+pair goes into `.env` first, as `FB_CLIENT_PORT` and `FB_API_PORT`. Going back
 works the same way in reverse (`docker compose down`, then the `docker run` from
 [section 4](#4-start-it-and-starting-automatically)): the single container takes
 the files back and points Fishbowl at its own MySQL again. Root's account for the
@@ -1314,12 +1446,13 @@ below) are refused. `FB_TLS` says where the certificate comes from:
   internet; port 80 isn't published by this `compose.yaml`, so it isn't set up
   for that out of the box. **Not tested.**
 
-Fishbowl Clients connect to `edge-tcp` on 2456 as they always have. With
-`FB_CLIENT_TLS=edge`, the edge terminates TLS on 2456 with its certificate
-instead, and Clients connect to `FB_PUBLIC_HOST` with **Secure Connection** on.
+Fishbowl Clients connect to `edge-tcp` on `FB_CLIENT_PORT` (2456) as they always
+have. With `FB_CLIENT_TLS=edge`, the edge terminates TLS on that port with its
+certificate instead, and Clients connect to `FB_PUBLIC_HOST` with **Secure
+Connection** on.
 Tested: Fishbowl Server's web app and its API answer through that TLS. **Not
 tested:** a Fishbowl Client signing in over Secure Connection. Integrated apps on
-28192 always get plain TCP, so keep that port to your network. Fishbowl Server
+`FB_API_PORT` (28192) always get plain TCP, so keep that port to your network. Fishbowl Server
 sees the edge's address, not the Client's (the edge-tcp log has the Client's).
 
 ### The egress allowlist
@@ -1564,6 +1697,7 @@ Allow them, and nothing else:
 |---|---|---|
 | In, from your network | 2456 | Fishbowl Clients and the REST API |
 | In, from your network (not the internet) | 28192 | Fishbowl's API, the "Legacy Port": integrated apps and integrations |
+| In, the same | 2457, 28193 | Only for a second Fishbowl on the same computer, such as a sandbox (its own pair, instead of 2456 and 28192) |
 | In, this computer only | 6080 | The Fishbowl page (published on 127.0.0.1) |
 | Out | 81, 443 | `fishbowlconnect.com` |
 | Out | 443 | `artanis.fishbowldev.com` and `www.fishbowlinventory.com` |
@@ -1590,7 +1724,9 @@ opens any of them, either way, can go:
 - **8080**: nothing in Fishbowl 26.10 or 26.11 uses it.
 
 If something ever listens for the network on a port outside the allowlist,
-`fishbowl-netcheck` reports it as **not allowed** and exits with 1. Opening a new
+`fishbowl-netcheck` reports it as **not allowed** and exits with 1. Each
+container allows only its own pair and 6080: one on 2457 and 28193 flags a
+listener on 2456, and the other way around. Opening a new
 port is then a deliberate change to this list, not a default.
 
 **What Fishbowl Server reaches on the internet, and why.** Licenses and plugins
@@ -1640,6 +1776,8 @@ ports matter:
 - **28192**, Fishbowl's API, for integrated apps and integrations on other
   computers: published. Keep it to your network and don't forward it from the
   internet: it's plain, unencrypted TCP.
+- **2457 and 28193**: the same two for a second Fishbowl on the computer, in
+  place of 2456 and 28192, never next to them in one container.
 - **3306**, MySQL: not published, on purpose. MySQL listens on the container's
   own loopback, its root user can only log in from inside the container, and its
   password is in this repository (see [The MySQL root
@@ -1650,7 +1788,8 @@ ports matter:
   the servers above.
 
 **The firewall on the computer that runs Docker** has to let 2456 and 28192 in
-for other computers; the commands are under [the Fishbowl
+for other computers (and 2457 and 28193 for a second Fishbowl); the commands are
+under [the Fishbowl
 Client](#9-the-fishbowl-client-in-its-browser-window). Outgoing connections are
 allowed by default on Windows, macOS and Linux. If a policy or security software
 blocks them, allow exactly the outbound names and ports in the allowlist.
@@ -1813,9 +1952,10 @@ them in `FBCHECK_BUILD_ARGS`, as for `run-checks.sh`.
 
 | Port | Published | What |
 |---|---|---|
-| 2456 | `-p 2456:2456` | Fishbowl Server's client port ("Port" in Server Administration; `webPort` in `eve.properties`). |
+| 2456 | `-p 2456:2456` | Fishbowl Server's client port ("Port" in Server Administration; `webPort` in `eve.properties`), set from `FISHBOWL_PORT` before every start. |
 | 6080 | `-p 127.0.0.1:6080:6080` | The Fishbowl page, including the browser windows (their screens travel over the page's WebSocket). |
-| 28192 | `-p 28192:28192` | Fishbowl's API, the "Legacy Port" (`port` in `eve.properties`): integrated apps and integrations connect here. |
+| 28192 | `-p 28192:28192` | Fishbowl's API, the "Legacy Port" (`port` in `eve.properties`), set from `FISHBOWL_LEGACY_PORT`: integrated apps and integrations connect here. |
+| 2457, 28193 | `-p 2457:2457 -p 28193:28193` | The same two for a second Fishbowl on the same computer, with `FISHBOWL_PORT=2457` and `FISHBOWL_LEGACY_PORT=28193` ([Two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer)). A container publishes one pair, never both. |
 | 3306, 33060 | never | MySQL, bound to 127.0.0.1 inside the container. |
 | 28182, 28282, 28292, 3305, 8080 | never | Closed in both directions: nothing here listens on them or connects out to them, and `fishbowl-netcheck` flags any listener (see [Network and firewall](#network-and-firewall-licenses-plugins-integrations)). |
 | 80, 81, 443 | never | Nothing listens on them here; outbound, they reach Fishbowl's servers (same section). |
@@ -1826,7 +1966,8 @@ sockets in `/run/fishbowl/`.
 
 In the Compose stack only the edge containers publish ports: `FB_HTTPS_PORT`
 (443, the page over HTTPS), `127.0.0.1:FB_PAGE_PORT` (6080), `FB_CLIENT_PORT`
-(2456) and `FB_API_PORT` (28192), each on `FB_LAN_IP`. MySQL (3306) is reachable
+(2456) and `FB_API_PORT` (28192), each on `FB_LAN_IP`, with the same numbers
+inside; Fishbowl Server's two ports are set to them. MySQL (3306) is reachable
 only on the internal data network.
 
 ### Commands
@@ -1854,7 +1995,9 @@ The same on Linux, macOS and Windows.
 
 | Variable | Default | |
 |---|---|---|
-| `TZ` | `UTC` | Time zone for Fishbowl and MySQL, as a tz database name, e.g. `America/Denver`. |
+| `TZ` | `UTC` | The time zone setup offers to keep, as a tz database name, e.g. `America/Denver`. Once setup has chosen one, that one applies ([The time zone](#the-time-zone)). |
+| `FISHBOWL_PORT` | (empty) | Fishbowl Server's client port, written into Server Administration's **Port** before every start; publish the same number (`-p 2457:2457`). Empty: Server Administration's setting stands (2456 from setup). |
+| `FISHBOWL_LEGACY_PORT` | (empty) | The same for the **Legacy Port** (28192 from setup). |
 | `FISHBOWL_PROMPT_TIMEOUT` | `1800` | Seconds each question of `fishbowl-setup` / `fishbowl-upgrade` waits before giving up. |
 | `FISHBOWL_ALLOW_TRIAL_UPGRADE` | `0` | `1` offers the upgrade to a trial installation. Fishbowl Server refuses to update a trial's database, so this only works when the new version doesn't change the database; the test suite uses it. |
 | `FISHBOWL_AUTO_UPDATE` | `1` | `0` turns off the update of a writable container's Fedora packages at each start (read-only containers get updates from rebuilds; see section 12). |
@@ -1873,16 +2016,16 @@ them with notes. Without the file, the defaults apply.
 
 | Setting | Default | |
 |---|---|---|
-| `FB_TZ` | `UTC` | The containers' time zone (it becomes `TZ`); also the backup schedule's. |
+| `FB_TZ` | `UTC` | The containers' time zone (it becomes `TZ`): the one setup offers to keep, and the backup schedule's. |
 | `FB_LAN_IP` | `0.0.0.0` | The address of this computer the edge publishes on; `0.0.0.0` is every IPv4 address. |
 | `FB_PUBLIC_HOST` | `localhost` | The name or IP address people type; the HTTPS certificate is made for it. |
 | `FB_HTTPS_PORT` | `443` | The page over HTTPS, for your network. |
 | `FB_PAGE_PORT` | `6080` | The page on this computer only (127.0.0.1). |
-| `FB_CLIENT_PORT` | `2456` | Fishbowl Clients and the REST API. |
-| `FB_API_PORT` | `28192` | Fishbowl's legacy API, for integrated apps. |
+| `FB_CLIENT_PORT` | `2456` | Fishbowl Clients and the REST API: published with the same number inside, and Fishbowl Server's **Port** is set to it before every start. Another Fishbowl on this computer: a pair of its own, such as 2457. |
+| `FB_API_PORT` | `28192` | Fishbowl's legacy API, for integrated apps, the same way (**Legacy Port**; 28193 with 2457). |
 | `FB_TLS` | `internal` | Where the certificate comes from ([The HTTPS front door](#the-https-front-door)). |
 | `FB_TLS_DIR` | `./certs` | The folder with your own certificate and key, for `FB_TLS=/certs/tls.crt /certs/tls.key`. |
-| `FB_CLIENT_TLS` | `off` | `edge`: TLS for Fishbowl Clients on 2456, with the edge's certificate. |
+| `FB_CLIENT_TLS` | `off` | `edge`: TLS for Fishbowl Clients on `FB_CLIENT_PORT`, with the edge's certificate. |
 | `FB_EGRESS_EXTRA` | (none) | More names the egress proxy lets through ([The egress allowlist](#the-egress-allowlist)). |
 | `FB_EGRESS_UPSTREAM` | (none) | `host:port` of your network's own proxy, if it requires one. |
 | `FB_SERVER_XMX` | (empty) | Fishbowl Server's heap, such as `6g`; written before every start, so it wins over Server Administration's memory field. Empty: that field stands (8 GB from setup). |
@@ -1968,9 +2111,9 @@ owner-only (as it does `eve.properties`); it doesn't delete Fishbowl's own files
 Docker says `port is already allocated`, `address already in use` or
 `Ports are not available`, and on Windows also `Only one usage of each socket
 address …` or `An attempt was made to access a socket in a way forbidden by its
-access permissions`. Something else on the computer already has 2456 or 6080.
-On a computer used for Fishbowl work, that's often a Fishbowl Server installed
-on the computer itself, which listens on 2456 too.
+access permissions`. Something else on the computer already has 2456, 28192 or
+6080. On a computer used for Fishbowl work, that's often a Fishbowl Server
+installed on the computer itself, which listens on 2456 and 28192 too.
 
 See what's listening on 2456 (use 6080 for the page's port):
 
@@ -1999,15 +2142,17 @@ shows no program, and Docker still can't have it. Restarting the Windows NAT
 service in PowerShell opened with **Run as administrator** (`net stop winnat`,
 then `net start winnat`) often frees them.
 
-To fix it, stop the other program, or give this container different ports on
-the computer. In `-p` and in `compose.yaml`'s `ports:`, the left number is the
-computer's and the right one stays as it is:
+To fix it, stop the other program, or give this container different ports:
 
-- `-p 2457:2456` (Compose: `"2457:2456"`): Fishbowl Clients connect to port
-  2457 instead. Not tested here; if Clients have trouble, free 2456 instead.
-- `-p 127.0.0.1:6081:6080` (Compose: `"127.0.0.1:6081:6080"`): the page is at
-  http://localhost:6081/, so change 6080 to 6081 in the links `fishbowl-link`
-  prints.
+- Fishbowl Server's pair: `-p 2457:2457 -p 28193:28193 -e FISHBOWL_PORT=2457 -e
+  FISHBOWL_LEGACY_PORT=28193` instead of the 2456 and 28192 options (Compose:
+  `FB_CLIENT_PORT=2457` and `FB_API_PORT=28193` in `.env`). Fishbowl Clients
+  then connect to 2457 ([Two Fishbowl Servers on one computer](#two-fishbowl-servers-on-one-computer)).
+  Keep each number the same on both sides of the `:`: Fishbowl Server listens
+  on the port Server Administration shows.
+- The page: `-p 127.0.0.1:6081:6080` (Compose: `FB_PAGE_PORT=6081` in `.env`):
+  the page is at http://localhost:6081/, so change 6080 to 6081 in the links
+  `fishbowl-link` prints.
 
 Either way, **recreate** the container rather than starting it again. In testing
 (Docker Engine 29.9.3), a container that had failed this way and was started
@@ -2017,8 +2162,25 @@ data, so recreating it costs nothing:
 
 - With `docker run`: `docker rm fishbowl`, then the `docker run` command again
   (with the new numbers, if you changed them).
-- With Compose: change the numbers in `compose.yaml` if you're changing them,
-  then `docker compose up -d --force-recreate`.
+- With Compose: change the numbers in `.env` if you're changing them, then
+  `docker compose up -d --force-recreate`.
+
+### "Server is already running" from a Fishbowl Server outside Docker
+
+A Fishbowl Server installed on the computer won't start, saying a server is
+already running, while the container's Fishbowl runs on another port. The
+container still publishes that port: Docker holds every port a running container
+publishes, even when nothing inside listens on it. See what each container
+publishes (the same in PowerShell):
+
+```bash
+docker ps --format "table {{.Names}}\t{{.Ports}}"
+```
+
+A container on the second pair should show only `2457`, `28193` and its page
+port. If one still shows 2456 or 28192, recreate it with only its own pair:
+[Moving a container to the other pair](#two-fishbowl-servers-on-one-computer).
+Its volumes keep everything.
 
 ### From the install guide's troubleshooting section, in a container
 
@@ -2119,9 +2281,11 @@ repeats the checks marked *(suite)*.
 | A new installation starts with no database: after setup MySQL holds only its system databases (`information_schema`, `mysql`, `performance_schema`, `sys`), none is selected, the import folder is empty | Verified *(suite)* |
 | `docker compose down -v` removes the three fixed-name volumes; `docker compose up -d --force-recreate` keeps them | Checked with a stand-in compose project (Docker Compose v5.7.0) |
 | Network: there's no firewall inside the container; Fishbowl Server listens for the network on 2456 and 28192 only (MySQL and 7770 on the container's loopback); both answer through their published ports | Verified *(suite)*, and the listeners listed by hand with Fishbowl Server running |
-| `fishbowl-netcheck` and the warning a minute after start: they report Fishbowl's servers by name and what listens for the network, flag anything outside 2456, 28192 and 6080 (a test listener on 8080 is caught and fails the check), and warn exactly when a server is blocked | Verified *(suite)* in a network that refuses outbound port 81, as a firewall would. Not run where Fishbowl's servers are reachable (this test network passes 80 and 443 through a proxy). |
+| `fishbowl-netcheck` and the warning a minute after start: they report Fishbowl's servers by name and what listens for the network, flag anything outside the container's own two Fishbowl ports and 6080 (test listeners on 8080, and on 2457 and 28193 in a container on 2456 and 28192, are caught and fail the check), and warn exactly when a server is blocked | Verified *(suite)* in a network that refuses outbound port 81, as a firewall would. Not run where Fishbowl's servers are reachable (this test network passes 80 and 443 through a proxy). |
+| **Two Fishbowl Servers on one computer**: a container on 2457 and 28193 (`FISHBOWL_PORT`, `FISHBOWL_LEGACY_PORT`) started while another program held 2456 and 28192 on the computer; Docker published only 2457, 28193 and the page's port; Server Administration showed 2457 and 28193 without anyone touching it; from another network, 2456 and 28192 reached the other program, while 2457 (Fishbowl's web app and REST API) and 28193 (its legacy API) reached this container's Fishbowl Server; 2458 typed into Server Administration went back to 2457 at the restart, with the log line; a Fishbowl Client from another network signed in on 2457 | Verified once by hand. The other program was a stand-in listener, not a second Fishbowl Server; the Client's sign-in was in an earlier run of the same test. Not run on Windows or Docker Desktop. |
+| The time zone at setup: GMT +5 on the page is saved, MySQL runs on +05:00, Fishbowl Server's Java has `TZ=Etc/GMT-5` and the log says so; the same after a restart and in the Client's window. At a terminal the sign is required, +15 is refused and -7 accepted; **Keep** gives `America/Denver`. Changed later the way [The time zone](#the-time-zone) says (the state file, then `docker restart`): GMT -7 from the next start (the log, MySQL at -07:00, Fishbowl's log seven hours behind UTC, its Java with `TZ=Etc/GMT+7`), then back to `America/Denver` | Verified *(suite: GMT +5 on the page)*; the rest once by hand |
 | What Fishbowl 26.10 and 26.11 contact: the names and ports read from their program files (the same 21 names and ports in both, compared on 23 November 2026); on 17 November 2026 the license and plugin names pointed at 74.63.56.90; the plugin update check fails at every start when port 81 is blocked (`Stream is invalid` in `fbserver.log`) | Checked by hand |
-| The Windows and Linux firewall commands for 2456 and 28192 | **Not run** (no Windows here, and no firewalld in the test machine) |
+| The Windows and Linux firewall commands for 2456 and 28192, and for 2457 and 28193 | **Not run** (no Windows here, and no firewalld in the test machine) |
 | Updating (section 12), run end to end in bash from the README's own blocks, on a trial installation with a company database: steps 1 to 6 (the old image kept by tag, the new one built, the backup written and read back, the new image on the same volumes, the upgrade, every table checksum unchanged), a damaged backup refused with the volumes untouched and `docker start` bringing it back, then going back to the backup (the old version runs on the data exactly as at the backup) | Verified once. The build read a local copy of this repository and a stand-in for the GitHub release, and the "new version" was the same installer named 2026.10.1, so Fishbowl's own database update at first start of a really new version wasn't exercised. |
 | The same blocks in zsh and in PowerShell 7 hand `docker` exactly the same arguments as in bash | Checked against a stand-in `docker` that records its arguments. Not run on Windows, in Windows PowerShell 5.1 or on a Mac; Compose's `docker compose build` from GitHub not run here. |
 | After setup: MySQL 8.4.10, `lower_case_table_names = 1`, heap 8192 MB, client 2048 MB, non-root processes, *healthy* | Verified *(suite)* |
@@ -2129,7 +2293,7 @@ repeats the checks marked *(suite)*.
 | Upgrade on the page (a stand-in newer version): offered, not without acceptance, a wrong password given on the page caught early, backup, upgrade, data and memory kept; an interrupted upgrade is finished before Fishbowl starts; downgrade refused; a trial isn't offered the upgrade | Verified *(suite)* |
 | `fishbowl-upgrade` at a terminal | Verified once |
 | The update at start on a writable container (`update-all.sh`): runs once in the background after the start delay, never restarts anything or asks, changes only files, skips MySQL and Java versions outside 8.4 and 21, stays off with `FISHBOWL_AUTO_UPDATE=0`, fails clearly when offline, keeps a few logs, waits for setup and upgrade jobs, and a real update of MySQL 8.4.10 to 8.4.13 still passes the runtime check | Verified *(suite: stand-in `dnf` tests, plus one real update)* |
-| **The hardened start** (read-only root filesystem, memory-only `/run`, `/tmp` and `/var/tmp`, `--cap-drop ALL` plus six, `no-new-privileges`, `--pids-limit 4096`): every check in this table marked *(suite)* passes on containers started that way, and nothing in the setup, MySQL, Fishbowl or session logs ran into the read-only root | Verified *(suite with `FBCHECK_RUN_ARGS` set to the README's flags: 94 passed, 0 failed)* |
+| **The hardened start** (read-only root filesystem, memory-only `/run`, `/tmp` and `/var/tmp`, `--cap-drop ALL` plus six, `no-new-privileges`, `--pids-limit 4096`): every check in this table marked *(suite)* passes on containers started that way, and nothing in the setup, MySQL, Fishbowl or session logs ran into the read-only root | Verified *(suite with `FBCHECK_RUN_ARGS` set to the README's flags: 96 passed, 0 failed, after the port pair and time zone changes)* |
 | The single container after the Compose stack's changes to the shared scripts: the whole suite again, with the hardened flags | Verified *(suite: 93 of 94 on the full run; the one miss was a build message I had reworded, put back as it was, and the 10 build checks then passed)* |
 | Each of the six kept capabilities is needed: without `CHOWN` or `FOWNER` the first start stops; without `DAC_OVERRIDE` the page never gets a state; without `KILL` setup never finishes and `docker stop` has to kill the container after 180 seconds; without `SETUID` or `SETGID` nothing can start as its own user | Verified once (a fresh container per capability left out) |
 | `fishbowl-backup` without a terminal: uses the image's password, keeps only the newest N of its label, stops with status 3 when the installation has a password of its own | Verified *(suite)* |
@@ -2163,6 +2327,8 @@ that ran these checks aren't in `tests/` yet.
 | Networks: only the edge publishes ports (6080 on 127.0.0.1 only); `app` and `data` internal; the page isn't on `data` and can't reach MySQL; no direct way out from any Fishbowl container; root signs in only from `localhost` and the data network | Verified |
 | The egress proxy: Fishbowl Server's own calls arrive there; names off the list, IP addresses and other ports refused; `FB_EGRESS_EXTRA` | Verified. The test network's own proxy relays HTTPS only, so Fishbowl's plain-HTTP calls (80, 81) failed past the egress proxy here. |
 | HTTPS: the page over TLS with the edge's own certificate authority, Secure cookie, same-origin checks, TLS 1.1 and older refused; TLS for Clients on 2456 (`FB_CLIENT_TLS=edge`) reaches Fishbowl Server's web app and API | Verified. A Fishbowl Client signing in over Secure Connection, and a public certificate, weren't tested. |
+| `FB_CLIENT_PORT=2457` and `FB_API_PORT=28193` with 2456 and 28192 held by another program: the stack starts; only edge-tcp publishes, on 2457 and 28193; Server Administration's ports move from 2456 and 28192 at the first start, with log lines; the same probes from another network as for the single container; TLS for Clients on 2457 (`FB_CLIENT_TLS=edge`); `fishbowl-netcheck` flags a listener on 2456. On the default pair, a new stack publishes only 2456 and 28192 there, and Server Administration shows them | Verified once by hand (a stand-in listener again) |
+| The time zone in the stack: the page offers `FB_TZ` (America/Denver, with daylight saving time); GMT -7 chosen: MySQL's time zone -07:00, kept after the database container restarts, and Server Administration's window with `TZ=Etc/GMT+7`; switched to +05:00, then back to the named zone, where MySQL follows its system clock again. On a new stack, changed later the way [The time zone](#the-time-zone) says (the state file, then `docker compose restart fishbowl`): GMT +5 to GMT -7 (both log lines, MySQL at -07:00 and still after its container restarted, Server Administration's window reopened with `TZ=Etc/GMT+7`), then back to `America/Denver` (MySQL on `SYSTEM`) | Verified once by hand |
 | Server Administration and the Client in the desktop container, drawn through the edge and the page at the browser's size; the Client signed in to Fishbowl Server in its own container | Verified |
 | A frozen Fishbowl Server (TCP still connects, HTTP doesn't answer): restarted in place 26 to 30 s after it froze, running again within a minute, 10 of 10 over two series | Verified |
 | The server container's main process killed from the host: Docker restarted it within 2.5 s and it was healthy again within 21 s, 10 of 10 over two series | Verified |
@@ -2174,7 +2340,7 @@ that ran these checks aren't in `tests/` yet.
 | Logs: every line timestamped in UTC, the same events in the same order over two restarts, no password or access code in any container's log, rotation set | Verified |
 | `docker compose down --volumes` keeps the six volumes; the dumps and settings files identical after a rebuild; Fishbowl back without setup | Verified |
 | The backup container: a set with every database, each company database alone, the settings files and the reports; owner-only; `--verify`; a damaged dump caught; a drill restore matching the live database row for row | Verified |
-| The weekly maintenance on the stack (`fishbowl-maintain.sh`): every image rebuilt with the package updates, a backup first, every container recreated on its new image and back where it was, the old images kept as `:previous`. A new Fishbowl Server image that never comes back: status 2, the new images kept as `:failed`, the containers' logs saved, every container back on the image it ran before | Verified *(`tests/maintain-check.sh`: 12 passed, 0 failed)*. Its first run here found that the backup step refused to run as the server container's user, so every weekly run stopped before changing anything; fixed. |
-| The same with `fishbowl-maintain.ps1` | Verified in PowerShell 7.4 on Linux, against the same Docker *(`tests/maintain-check.sh --powershell`: 12 passed, 0 failed)*. Its first run here found that the wait for the stack to come back counted a failure as success (a PowerShell function returns everything it writes along with its result), so a broken image would have stayed; fixed. Not run in Windows PowerShell 5.1, which the scheduled task uses, or on Windows. |
+| The weekly maintenance on the stack (`fishbowl-maintain.sh`): every image rebuilt with the package updates, a backup first, every container recreated on its new image and back where it was, the old images kept as `:previous`. A new Fishbowl Server image that never comes back: status 2, the new images kept as `:failed`, the containers' logs saved, every container back on the image it ran before | Verified *(`tests/maintain-check.sh`: 12 passed, 0 failed)*, before the port pair change of 24 November (that change wasn't run through this check). Its first run here found that the backup step refused to run as the server container's user, so every weekly run stopped before changing anything; fixed. |
+| The same with `fishbowl-maintain.ps1` | Verified in PowerShell 7.4 on Linux, against the same Docker *(`tests/maintain-check.sh --powershell`: 12 passed, 0 failed)*. Its first run here found that the wait for the stack to come back counted a failure as success (a PowerShell function returns everything it writes along with its result), so a broken image would have stayed; fixed. Also before the port pair change. Not run in Windows PowerShell 5.1, which the scheduled task uses, or on Windows. |
 | Fishbowl's own updates in the stack, Docker Desktop | **Not run** with the stack (Fishbowl's own updates need a purchased license) |
 

@@ -5,7 +5,8 @@
 #   https://FB_PUBLIC_HOST       the Fishbowl page, for your network (443 in here)
 #   http://localhost:6080        the Fishbowl page, for this computer only
 #   https://FB_PUBLIC_HOST:2456  Fishbowl Clients over TLS, used only when
-#                                FB_CLIENT_TLS=edge (edge-tcp sends 2456 here)
+#                                FB_CLIENT_TLS=edge (edge-tcp sends them here, on
+#                                Fishbowl Server's Port: FB_CLIENT_PORT, 2456)
 #
 # FB_TLS picks where the certificate comes from:
 #   internal (default)          Caddy's own certificate authority, kept in the
@@ -62,11 +63,12 @@ http://:6080 {
 	import page
 }
 
-# Fishbowl Clients over TLS (FB_CLIENT_TLS=edge). Fishbowl Server itself speaks
-# plain HTTP on 2456; this terminates TLS with the edge's certificate.
-https://{$FB_PUBLIC_HOST:localhost}:2456 {
+# Fishbowl Clients over TLS (FB_CLIENT_TLS=edge), on Fishbowl Server's Port
+# (FB_CLIENT_PORT). Fishbowl Server itself speaks plain HTTP there; this
+# terminates TLS with the edge's certificate.
+https://{$FB_PUBLIC_HOST:localhost}:{$FB_CLIENT_PORT:2456} {
 	tls {$FB_TLS:internal}
-	reverse_proxy fishbowl:2456
+	reverse_proxy fishbowl:{$FB_CLIENT_PORT:2456}
 	header -Server
 }
 

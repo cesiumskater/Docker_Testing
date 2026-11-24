@@ -192,6 +192,7 @@
     show($('setup-card'), needSetup);
     if (needSetup) {
       loadEula();
+      fillTimeZones(s.time_zone);
       show($('setup-volumes'), s.volumes === 'unnamed');
       if (waiting.setup && !pending.setup && (err || Date.now() - waiting.setup > 30000)) waiting.setup = 0;
     } else {
@@ -329,6 +330,38 @@
   }
 
   // ------------------------------------------------------------ first-time setup
+  // The time zone list: the container's own zone first when it's a named one (it
+  // may follow daylight saving time, which no GMT offset does), then GMT -12 to
+  // GMT +14. Filled once, so a choice isn't reset by the next status poll.
+  let tzFilled = false;
+  function gmtText(minutes) {
+    const m = Math.abs(minutes);
+    return 'GMT ' + (minutes < 0 ? '-' : '+') + Math.floor(m / 60) + (m % 60 ? ':' + String(m % 60).padStart(2, '0') : '');
+  }
+  function fillTimeZones(tz) {
+    if (tzFilled || !tz) return;
+    tzFilled = true;
+    const sel = $('setup-tz');
+    const named = !/^(UTC|Etc\/(GMT|UTC).*)$/.test(tz.name);
+    const now = gmtText(tz.offset_minutes);
+    const dst = tz.daylight_saving ? ', changes for daylight saving time' : '';
+    setText($('setup-tz-now'), 'This container is on ' + (named ? tz.name + ' (' + now + ' now' + dst + ')' : now) +
+      '. Fishbowl dates orders, receipts and reports in its time zone.');
+    if (named) {
+      const o = document.createElement('option');
+      o.value = 'keep';
+      o.textContent = 'Keep ' + tz.name + ' (' + now + ' now)';
+      sel.appendChild(o);
+    }
+    for (let h = -12; h <= 14; h++) {
+      const o = document.createElement('option');
+      o.value = String(h);
+      o.textContent = 'GMT ' + (h < 0 ? '-' : '+') + Math.abs(h);
+      sel.appendChild(o);
+    }
+    sel.value = named ? 'keep' : String(Math.round(tz.offset_minutes / 60));
+  }
+
   function formError(id, text) {
     const el = $(id);
     el.textContent = text || '';
@@ -346,6 +379,7 @@
       eula_accepted: true,
       eula_sha256: eula.sha256,
       license: license ? license.value : '',
+      timezone: $('setup-tz').value || 'keep',
     };
     if (body.license === 'key') {
       body.key = $('setup-key').value.replace(/\s+/g, '');

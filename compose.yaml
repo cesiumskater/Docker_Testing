@@ -39,8 +39,11 @@
 #              kept 14 days, 8 weeks and 12 months by default.
 #   edge       HTTPS for the Fishbowl page (443), the page on this computer
 #              (127.0.0.1:6080), and TLS for Fishbowl Clients when FB_CLIENT_TLS=edge.
-#   edge-tcp   Ports 2456 (Fishbowl Clients) and 28192 (integrated apps), passed
-#              through to Fishbowl Server.
+#   edge-tcp   Fishbowl Server's two ports, passed through: FB_CLIENT_PORT (2456,
+#              Fishbowl Clients) and FB_API_PORT (28192, integrated apps). The same
+#              numbers inside, and Server Administration's Port and Legacy Port
+#              follow them, so a second Fishbowl on this computer can have another
+#              pair (README, "Two Fishbowl Servers on one computer").
 #   egress     The only way out: Fishbowl's own servers, by name, nothing else.
 #
 # `restart: always` starts every container whenever Docker starts, even one
@@ -135,6 +138,10 @@ services:
       # Fishbowl Server's heap, for example 6g. Empty: Server Administration's
       # memory setting stands (8 GB from setup).
       FISHBOWL_SERVER_XMX: ${FB_SERVER_XMX:-}
+      # Its two ports, the ones edge-tcp publishes: written into Server
+      # Administration's Port and Legacy Port before every start.
+      FISHBOWL_PORT: ${FB_CLIENT_PORT:-2456}
+      FISHBOWL_LEGACY_PORT: ${FB_API_PORT:-28192}
     secrets: [mysql_root]
     depends_on:
       volume-init: { condition: service_completed_successfully }
@@ -292,6 +299,7 @@ services:
     environment:
       FB_PUBLIC_HOST: ${FB_PUBLIC_HOST:-localhost}
       FB_TLS: ${FB_TLS:-internal}
+      FB_CLIENT_PORT: ${FB_CLIENT_PORT:-2456}   # TLS for Clients there, with FB_CLIENT_TLS=edge
     volumes:
       # Caddy's certificates, and its own certificate authority with FB_TLS=internal.
       - fishbowl-edge:/data
@@ -313,11 +321,15 @@ services:
     container_name: fishbowl-edge-tcp
     networks: [public, app]
     # Fishbowl Clients and integrated apps, on FB_LAN_IP (default: every IPv4
-    # address of this computer). Keep 28192 to your network: it's plain TCP.
+    # address of this computer). Keep the API port to your network: it's plain
+    # TCP. Only this pair: Docker reserves a published port on the computer even
+    # when nothing listens behind it.
     ports:
-      - "${FB_LAN_IP:-0.0.0.0}:${FB_CLIENT_PORT:-2456}:2456"     # Fishbowl Clients and the REST API
-      - "${FB_LAN_IP:-0.0.0.0}:${FB_API_PORT:-28192}:28192"      # Fishbowl's legacy API: integrated apps
+      - "${FB_LAN_IP:-0.0.0.0}:${FB_CLIENT_PORT:-2456}:${FB_CLIENT_PORT:-2456}"   # Fishbowl Clients and the REST API
+      - "${FB_LAN_IP:-0.0.0.0}:${FB_API_PORT:-28192}:${FB_API_PORT:-28192}"       # Fishbowl's legacy API: integrated apps
     environment:
+      FB_CLIENT_PORT: ${FB_CLIENT_PORT:-2456}
+      FB_API_PORT: ${FB_API_PORT:-28192}
       # off: Clients reach Fishbowl Server as they always have. edge: the edge
       # terminates TLS on 2456 with its certificate (Clients use Secure Connection).
       FB_CLIENT_TLS: ${FB_CLIENT_TLS:-off}

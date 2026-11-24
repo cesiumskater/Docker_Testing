@@ -44,6 +44,7 @@ readonly IMPORT_DIR=/var/lib/fishbowl/import   # .sql files for the Restore tab 
 readonly PENDING_EVE=/var/lib/fishbowl/state/pending-eve.properties
 readonly INSTALLER_TMP=/var/lib/fishbowl/tmp
 readonly RUN_DIR=/run/fishbowl
+readonly SERVER_PORT_FILE=$RUN_DIR/server-port   # the client port Fishbowl Server read at its last start
 readonly UPDATE_LOCK="$RUN_DIR/update.lock"   # held while update-all.sh changes packages; setup and upgrades wait for it
 readonly STATUS_FILE=/run/fishbowl/status
 readonly MESSAGE_FILE=/run/fishbowl/message          # the longer text that goes with the status
@@ -240,6 +241,14 @@ props_set() { printf '%s' "$3" | python3 -I "$LIB_DIR/props.py" set "$1" "$2"; }
 eve_get() { [ -f "$FB_EVE" ] && props_get "$FB_EVE" "$1" 2>/dev/null; }
 database_configured() { local n; n="$(eve_get dbName || true)"; [ -n "$n" ]; }
 client_port() { local p; p="$(eve_get webPort || true)"; printf '%s\n' "${p:-2456}"; }
+# The port Fishbowl Server serves Clients on now: the one it read at its last
+# start, or, before it ever started, the one it will use.
+server_port_now() {
+  local p
+  p="$(cat "$SERVER_PORT_FILE" 2>/dev/null || true)"
+  [[ "$p" =~ ^[0-9]+$ ]] || p="$(client_port)"
+  printf '%s\n' "$p"
+}
 
 # The Fishbowl Client in its window connects to Fishbowl Server by the address in
 # client.properties: localhost in the single container, the server container's
@@ -254,6 +263,13 @@ client_point_server() {
     if [ "$cur" != "$want" ] && { split_role || [ "$cur" = "${FISHBOWL_SERVER_HOST:-fishbowl}" ]; }; then
       props_set "$f" "$key" "$want"
     fi
+  done
+  # The port follows Server Administration's Port, as Fishbowl Server runs now
+  # (Fishbowl itself leaves the Client's ports at 2456 when that Port changes).
+  want="$(server_port_now)"
+  for key in ServerPort CheckoutServerPort; do
+    cur="$(props_get "$f" "$key" 2>/dev/null || true)"
+    [ "$cur" = "$want" ] || props_set "$f" "$key" "$want"
   done
 }
 
@@ -361,6 +377,85 @@ installed_app_version() {  # what /opt/Fishbowl itself says it is (e.g. 26.10)
 write_state() {  # write_state FILE CONTENT  (atomic)
   local f="$STATE_DIR/$1"
   printf '%s\n' "$2" > "$f.tmp" && mv -f "$f.tmp" "$f"
+}
+
+# --------------------------------------------------------------- time zone ---
+# First-time setup asks for the time zone as a GMT offset (GMT +5, GMT -7) or
+# keeps the container's own TZ (docker run -e TZ, FB_TZ in the stack). The answer
+# is kept in the data volume as a zone name and applies to MySQL and Fishbowl's
+# programs at every start. A GMT offset is an Etc/GMT zone, whose sign is the
+# other way round (GMT -7 is Etc/GMT+7) and which never changes for daylight
+# saving time.
+readonly TIME_ZONE_FILE="$STATE_DIR/timezone"
+time_zone_valid() {  # a zone name this image has data for
+  [[ "${1:-}" =~ ^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$ ]] && [ -f "/usr/share/zoneinfo/$1" ]
+}
+tz_offset_name() {  # tz_offset_name N (-12..14) -> Etc/GMT zone name
+  if [ "$1" = 0 ]; then echo Etc/GMT
+  elif [ "$1" -gt 0 ]; then echo "Etc/GMT-$1"
+  else echo "Etc/GMT+${1#-}"
+  fi
+}
+# tz_parse_offset TEXT -> N for "+5", "-7", "GMT -7", "UTC+05:00", "0". Status 1:
+# not an offset; 2: a sign is missing; 3: outside GMT -12 .. GMT +14.
+tz_parse_offset() {
+  local t sign n
+  t="$(printf '%s' "$1" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+  t="${t#GMT}"; t="${t#UTC}"
+  [[ "$t" =~ ^([+-]?)0*([0-9]{1,2})(:00)?$ ]] || return 1
+  sign="${BASH_REMATCH[1]}"; n=$((10#${BASH_REMATCH[2]}))
+  if [ "$n" = 0 ]; then echo 0; return 0; fi
+  [ -n "$sign" ] || return 2
+  [ "$sign" = - ] && n=$((-n))
+  { [ "$n" -ge -12 ] && [ "$n" -le 14 ]; } || return 3
+  echo "$n"
+}
+tz_gmt_now() {  # tz_gmt_now ZONE -> "GMT -7", "GMT +5:30", "GMT +0" as of now
+  local z
+  z="$(TZ="${1:-UTC}" date +%z)"
+  printf 'GMT %s%d' "${z:0:1}" "$((10#${z:1:2}))"
+  [ "${z:3:2}" = 00 ] || printf ':%s' "${z:3:2}"
+  printf '\n'
+}
+tz_describe() {  # tz_describe ZONE -> "GMT -7" or "America/Denver (GMT -7 now)"
+  case "${1:-UTC}" in
+    Etc/GMT*) tz_gmt_now "$1" ;;
+    *)        printf '%s (%s now)\n' "${1:-UTC}" "$(tz_gmt_now "${1:-UTC}")" ;;
+  esac
+}
+# apply_time_zone [--log]: TZ from the setup's answer, for everything started
+# after it; --log says which one in the container log (once per start).
+apply_time_zone() {
+  local tz=""
+  [ -f "$TIME_ZONE_FILE" ] || return 0
+  IFS= read -r tz < "$TIME_ZONE_FILE" || true
+  if time_zone_valid "$tz"; then
+    export TZ="$tz"
+    [ "${1:-}" != --log ] || log "Time zone: $(tz_describe "$TZ") (chosen at setup)"
+  else
+    warn "The time zone chosen at setup ('$tz' in $TIME_ZONE_FILE) isn't one this image knows; Fishbowl keeps ${TZ:-UTC}."
+  fi
+}
+# db_time_zone_sync: the database container keeps its own TZ (FB_TZ), so a GMT
+# offset chosen at setup goes into MySQL itself; SET PERSIST keeps it in MySQL's
+# data directory. Only for the Compose stack: the single container's MySQL
+# starts with TZ. Needs the root password variable's name.
+db_time_zone_sync() {
+  local pwvar="$1" want sql have
+  db_external || return 0
+  case "${TZ:-}" in
+    Etc/GMT*) want="$(TZ="$TZ" date +%:z)"; sql="SET PERSIST time_zone = '$want'" ;;
+    # A named zone is the database container's own FB_TZ (the one setup offers
+    # to keep): MySQL follows its system clock again.
+    *)        want=SYSTEM; sql="RESET PERSIST IF EXISTS time_zone; SET GLOBAL time_zone = 'SYSTEM'" ;;
+  esac
+  have="$(mysql_root "$pwvar" -N -B -e 'SELECT @@GLOBAL.time_zone' 2>/dev/null)" || return 0
+  [ "$have" = "$want" ] && return 0
+  if mysql_root "$pwvar" -e "$sql" 2>/dev/null; then
+    log "MySQL's time zone is now $want ($(tz_describe "${TZ:-UTC}"), chosen at setup)"
+  else
+    warn "MySQL's time zone couldn't be set to $want; dates MySQL stamps itself may differ from Fishbowl's."
+  fi
 }
 
 # Facts the page shows next to the status. Written whenever they change.
@@ -545,6 +640,7 @@ db_wait_external() {
       mysql_root db_pw -N -B -e 'SELECT 1' >/dev/null 2>&1 && break
       sleep 2
     done
+    db_time_zone_sync db_pw   # a GMT offset chosen at setup holds in MySQL too
     db_pw=""
   fi
   db_point_fishbowl
@@ -756,6 +852,47 @@ sync_server_memory() {
   log "Server memory: now ${want} (was ${have:-unset}), $why"
 }
 
+# FISHBOWL_PORT and FISHBOWL_LEGACY_PORT (FB_CLIENT_PORT and FB_API_PORT in the
+# Compose stack) name the two ports this container is published on. Docker
+# reserves published ports on the computer whether anything listens behind them
+# or not, so a container must publish only the pair its Fishbowl Server uses: a
+# second Fishbowl on the same computer (2457 and 28193, say) can then have the
+# others. When set, they're written into Server Administration's Port and Legacy
+# Port (webPort and port in eve.properties) before every start, so that window
+# always shows the ports that really run; a different value saved there is put
+# back, with a log line saying how to move the container instead. Unset (a
+# container from an earlier version of these instructions), Server
+# Administration's values stand.
+port_number_ok() { [[ "${1:-}" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$1" -le 65535 ]; }
+sync_server_ports() {
+  local key var want have
+  [ -f "$FB_EVE" ] || return 0
+  for key in webPort port; do
+    if [ "$key" = webPort ]; then var=FISHBOWL_PORT; else var=FISHBOWL_LEGACY_PORT; fi
+    want="${!var:-}"
+    [ -n "$want" ] || continue
+    if ! port_number_ok "$want" || [[ " 3306 33060 6080 7770 " == *" $want "* ]]; then
+      warn "$var must be a free port number such as $([ "$key" = webPort ] && echo 2457 || echo 28193); '$want' is ignored, so Server Administration's setting stands."
+      continue
+    fi
+    have="$(props_get "$FB_EVE" "$key" 2>/dev/null || true)"
+    [ "$have" = "$want" ] && continue
+    props_set "$FB_EVE" "$key" "$want"
+    if [ -n "$have" ]; then
+      log "Server Administration's $([ "$key" = webPort ] && echo Port || echo "Legacy Port") was $have; set to $want, the port this container is published on ($var). To use $have instead, start the container again with -p $have:$have and $var=$have (README, \"Two Fishbowl Servers on one computer\")."
+    fi
+  done
+  return 0
+}
+# run_ports_text: the -p and -e options for this container's pair of ports, for
+# the docker run commands the log prints.
+run_ports_text() {
+  local p l
+  p="${FISHBOWL_PORT:-$(eve_get webPort || true)}"; p="${p:-2456}"
+  l="${FISHBOWL_LEGACY_PORT:-$(eve_get port || true)}"; l="${l:-28192}"
+  printf -- '-p %s:%s -p %s:%s -e FISHBOWL_PORT=%s -e FISHBOWL_LEGACY_PORT=%s' "$p" "$p" "$l" "$l" "$p" "$l"
+}
+
 verify_memory_settings() {  # fails if 8192 / 2048 did not take effect
   local name f bad=0
   for name in "${SERVER_VMOPTIONS[@]}"; do
@@ -830,7 +967,7 @@ volume_name_for() {
 
 print_run_command() {  # print_run_command [docker-only]
   note "  docker run -d --name fishbowl --restart always --stop-timeout 180 \\"
-  note "    -p 2456:2456 -p 28192:28192 -p 127.0.0.1:6080:6080 \\"
+  note "    $(run_ports_text) -p 127.0.0.1:6080:6080 \\"
   note "    -v $(volume_name_for "$MYSQL_DATA" fishbowl-mysql):/var/lib/mysql \\"
   note "    -v $(volume_name_for "$FB_HOME" fishbowl-app):/opt/Fishbowl \\"
   note "    -v $(volume_name_for "$DATA_DIR" fishbowl-data):/var/lib/fishbowl \\"

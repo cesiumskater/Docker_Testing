@@ -310,15 +310,25 @@ def runtime(a):
     t0 = time.time()
 
     def setup_on_page():
-        page.setup()
+        tz = page.status().get("time_zone") or {}
+        expect(tz.get("name") == "UTC" and tz.get("offset_minutes") == 0, f"the form offers the container's zone as {tz}")
+        page.setup(timezone=5)   # GMT +5 from the form's list (the container itself runs on UTC)
         st = page.wait_state("awaiting-database", 900)
         expect(st["install_type"] == "trial" and st["installed_version"] == st["image_version"])
-    ok = check("setup on the page: license agreement and trial, no password to choose -> installed, waiting for a database", setup_on_page)
+    ok = check("setup on the page: license agreement, trial and time zone (GMT +5), no password to choose -> installed, waiting for a database", setup_on_page)
     print(f"      (install took {time.time() - t0:.0f}s)", flush=True)
     if not ok:
         return
     check("the acceptance is on record, with how it was given", lambda: expect(
         "Fishbowl page" in box.exec("sh", "-c", "cat /var/lib/fishbowl/state/eula/accepted-*").stdout))
+
+    def time_zone_chosen():
+        saved = box.exec("cat", "/var/lib/fishbowl/state/timezone").stdout.strip()
+        expect(saved == "Etc/GMT-5", f"saved as {saved!r}")
+        diff = box.sql("SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP())")
+        expect(diff == "05:00:00", f"MySQL's clock is {diff} from UTC")
+        expect("Time zone: GMT +5" in box.logs(), "the log doesn't name the time zone")
+    check("the time zone chosen at setup (GMT +5) is saved, MySQL runs on it, and the log says so", time_zone_chosen)
 
     def starts_with_no_database():
         st = page.status()
@@ -342,6 +352,12 @@ def runtime(a):
     ok = check("Server Administration in its browser window: create a database, Password left as Fishbowl filled it in -> Fishbowl Server starts by itself", create_database)
     if not ok:
         return
+
+    def server_time_zone():
+        r = box.exec("sh", "-c", "for p in $(pgrep -u fishbowl java); do tr '\\0' '\\n' < /proc/$p/environ | grep '^TZ='; done | sort -u",
+                     user="fishbowl")
+        expect(r.stdout.strip() == "TZ=Etc/GMT-5", f"Fishbowl's Java runs with {r.stdout.strip() or 'no TZ'} {r.stderr.strip()}")
+    check("Fishbowl Server runs in the time zone chosen at setup (TZ=Etc/GMT-5)", server_time_zone)
 
     out = box.sql("SELECT VERSION(), @@lower_case_table_names")
     check("MySQL reports 8.4.x", lambda: expect(out.startswith("8.4."), out))
@@ -392,6 +408,14 @@ def runtime(a):
         r2 = box.exec("bash", "-c", probe)
         expect(re.search(r"^  8080 +NOT ALLOWED", r2.stdout, re.M) and "rc=1" in r2.stdout,
                "a listener on 8080 must be flagged and fail the check:\n" + r2.stdout[-500:])
+        # Only this Fishbowl's own pair: another Fishbowl's (2457 and 28193) is flagged too.
+        code = ("import socket, time\nls = []\nfor p in (2457, 28193):\n    s = socket.socket()\n"
+                "    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind((\"0.0.0.0\", p))\n"
+                "    s.listen()\n    ls.append(s)\ntime.sleep(30)\n")
+        r3 = box.exec("bash", "-c", f"python3 -I -c '{code}' & sleep 1; fishbowl-netcheck; echo \"rc=$?\"; kill $!")
+        expect(re.search(r"^  2457 +NOT ALLOWED", r3.stdout, re.M) and re.search(r"^  28193 +NOT ALLOWED", r3.stdout, re.M)
+               and "rc=1" in r3.stdout,
+               "listeners on another Fishbowl's ports (2457, 28193) must be flagged:\n" + r3.stdout[-600:])
     check("fishbowl-netcheck reports Fishbowl's servers and what listens; the log warns exactly when one is blocked",
           netcheck)
 

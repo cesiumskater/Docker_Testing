@@ -11,7 +11,7 @@
 #                                             Fishbowl uses can't be reached
 #
 # Exit status: 0 when every server Fishbowl uses answered, nothing outside the
-# inbound allowlist (2456, 28192, 6080) listens for the network, and (behind the
+# inbound allowlist (Fishbowl Server's Port and Legacy Port, 6080) listens for the network, and (behind the
 # egress proxy) there's no way out except the proxy; 1 otherwise.
 #
 # Run alone (docker run), the container has no firewall inside: everything may go
@@ -170,11 +170,16 @@ listening() {
     awk 'NR > 1 && $4 == "0A" { split($2, a, ":"); if (a[1] !~ /7F$/ && a[1] != "00000000000000000000000001000000") print strtonum("0x" a[2]) }' "$f"
   done | sort -nu
 }
-# The inbound allowlist: the only ports that may listen for the network.
+# The inbound allowlist: this Fishbowl Server's own two ports (Server
+# Administration's Port, as it runs now, and Legacy Port: 2456 and 28192 unless
+# changed) and the page. Nothing else may listen for the network, another
+# Fishbowl's ports included.
+FB_CLIENT_PORT_NOW="$(server_port_now)"
+FB_LEGACY_PORT_NOW="$(eve_get port || true)"; FB_LEGACY_PORT_NOW="${FB_LEGACY_PORT_NOW:-28192}"
 port_name() {
   case "$1" in
-    2456)  echo "Fishbowl Clients and the REST API (Fishbowl Server's webPort)" ;;
-    28192) echo "Fishbowl's legacy API: integrated apps (Fishbowl Server's port; LAN only)" ;;
+    "$FB_CLIENT_PORT_NOW") echo "Fishbowl Clients and the REST API (Server Administration's Port)" ;;
+    "$FB_LEGACY_PORT_NOW") echo "Fishbowl's legacy API: integrated apps (Server Administration's Legacy Port; LAN only)" ;;
     6080)  echo "the Fishbowl page (publish it on 127.0.0.1 only)" ;;
     *)     echo "" ;;
   esac
@@ -203,7 +208,7 @@ for p in $LISTEN; do
   if [ -n "$name" ]; then
     printf '  %-6s %s\n' "$p" "$name"
   else
-    printf '  %-6s NOT ALLOWED: nothing but 2456, 28192 and 6080 may listen for the network\n' "$p"
+    printf '  %-6s NOT ALLOWED: nothing but %s, %s and 6080 may listen for the network\n' "$p" "$FB_CLIENT_PORT_NOW" "$FB_LEGACY_PORT_NOW"
     EXTRA+=("$p")
   fi
 done

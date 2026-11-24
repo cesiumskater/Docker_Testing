@@ -48,7 +48,11 @@ elif ! mysqladmin --protocol=socket --socket=/var/lib/mysql/mysql.sock ping --si
   echo "MySQL is not answering"
   exit 1
 fi
-port="$(python3 -I /usr/local/lib/fishbowl/props.py get /opt/Fishbowl/server/bin/eve.properties webPort 2>/dev/null || echo 2456)"
+# The port Fishbowl Server serves now (written at its start: a Port changed in
+# Server Administration only counts after the next start), else its setting.
+port="$(cat /run/fishbowl/server-port 2>/dev/null)"
+[[ "$port" =~ ^[0-9]+$ ]] ||
+  port="$(python3 -I /usr/local/lib/fishbowl/props.py get /opt/Fishbowl/server/bin/eve.properties webPort 2>/dev/null || echo 2456)"
 # An HTTP answer, not just a TCP connection: a hung Java still accepts those (E3).
 if ! timeout 5 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$1"; printf "GET / HTTP/1.0\r\n\r\n" >&3; IFS= read -r l <&3; [[ "$l" == HTTP/* ]]' _ "$port" 2>/dev/null; then
   echo "Fishbowl Server isn't answering HTTP on port $port"
